@@ -1,6 +1,6 @@
 # Hush — Implementation Notes
 
-Checkpoint document recording decisions made, problems encountered, and deviations from `plan.md` during implementation. Intended as a reference for resuming work after a break.
+Checkpoint document recording decisions made, problems encountered, and deviations from `plan.md` during implementation.
 
 ---
 
@@ -11,16 +11,16 @@ Checkpoint document recording decisions made, problems encountered, and deviatio
 | `label_store.py` | Done |
 | `capture.py` | Done |
 | `label.py` | Done |
-| `train.py` | Not started |
-| `monitor.py` | Not started |
+| `train.py` | Done |
+| `monitor.py` | Done |
+
+All components implemented. Git repo initialized with initial commit `e28ffe4`.
 
 ---
 
 ## Environment
 
 ### Python version: 3.12 (not 3.9 as originally planned)
-
-The original plan specified Python 3.9. During setup this turned out to be unstable:
 
 - Python 3.9 was initially used because it had PyTorch wheels and built-in tkinter.
 - Running `brew install python-tk@3.13` later in the session silently removed `tcl-tk` 8.6, which Python 3.9's `_tkinter.so` was dynamically linked against. Result: tkinter entirely broken on 3.9 with no recoverable path.
@@ -45,6 +45,7 @@ scikit-learn==1.8.0
 scipy==1.17.1
 joblib==1.5.3
 tqdm==4.67.3
+matplotlib            # added later for plot_roc.py
 tkinter (tcl/tk 9.0.3, via python-tk@3.12)
 ```
 
@@ -56,6 +57,17 @@ torchvision>=0.15,<0.20
 numpy>=1.24,<2       # torch <2.5 requires numpy 1.x
 ```
 
+Note: this machine has Apple Silicon (MPS available), not Intel x86_64 as originally assumed. Feature extraction runs on MPS.
+
+### ResNet-50 weights: SSL workaround
+
+Homebrew Python doesn't use the macOS system certificate store, so the automatic download of ResNet-50 weights (`IMAGENET1K_V2`) fails with an SSL error. Workaround: download manually with curl to the torch cache directory:
+
+```bash
+curl -L -o ~/.cache/torch/hub/checkpoints/resnet50-11ad3fa6.pth \
+  https://download.pytorch.org/models/resnet50-11ad3fa6.pth
+```
+
 ---
 
 ## Feature Extraction: Why ResNet-50
@@ -64,160 +76,139 @@ Color histograms were considered and rejected. The failure mode is too predictab
 
 ResNet-50 encodes semantic content and production grammar — network overlays, lower-third graphics, the visual style of broadcast vs. advertising — and can learn to distinguish these from labeled examples. This is the right tool from the start; there is no value in prototyping histograms.
 
+DINOv2 was discussed as a more modern alternative. Decision: start with ResNet-50 (simpler, well-understood, no external hub dependency), switch if accuracy proves insufficient. The extractor abstraction in `train.py` and `monitor.py` makes swapping straightforward.
+
+---
+
+## Classifier: GBM beats Random Forest
+
+Initial results with `RandomForestClassifier` (n_estimators=300, class_weight='balanced'):
+- AUC: 0.985, but ad recall only **45%** (class imbalance 7:1 content:ad dominated)
+
+Switching to `HistGradientBoostingClassifier` (class_weight='balanced') on the same 1007 frames:
+- AUC: **0.993**, ad recall **87%**, accuracy 0.965, macro F1 0.918
+
+GBM is the default. RF remains available via `--classifier rf`.
+
+ROC curve analysis (see `plot_roc.py`) showed AUC 0.991 for binary ad/rest detection, with a broad range of usable thresholds (0.2–0.8 all give FPR < 3%). The classifier outputs well-separated probabilities so threshold choice matters little in practice.
+
 ---
 
 ## Label Taxonomy
 
-The original plan used a binary `ad` / `not_ad` taxonomy. This was expanded during implementation. The actual label values stored in the DB and the keys used in the code are:
+The original plan used a binary `ad` / `not_ad` taxonomy. This was expanded during implementation:
 
-| Label | Key | Meaning | Included in training |
-|---|---|---|---|
-| Ad | `ad` | Commercial break | Yes |
-| Content | `content` | Game/sport in progress | Yes |
-| Neither | `neither` | Something else on screen (recipe, browser tab, etc.) | Yes |
-| Ignore | `ignore` | Weird/corrupted frame, would add noise | No |
+| Label | Key | Meaning | Included in training | Monitor behavior |
+|---|---|---|---|---|
+| Ad | `ad` | Commercial break | Yes | Mute |
+| Content | `content` | Game/sport in progress | Yes | Unmute |
+| Neither | `neither` | Something else on screen (recipe, browser tab, etc.) | Yes | No change |
+| Ignore | `ignore` | Weird/corrupted frame, would add noise | No | — |
 
-**Why `neither` is a real class:** The user explicitly watches while cooking and will tab away to recipes. A classifier that treats "tabbed away to browser" as content or ad would mute at the wrong time. Teaching the model what a tabbed-away screen looks like is cheap (a handful of labeled frames) and prevents a real annoyance.
+**Why `neither` is a real class:** The user explicitly watches while cooking and will tab away to recipes. Teaching the model what a tabbed-away screen looks like is cheap and prevents false mutes.
 
-**Why `ignore` is excluded from training:** Corrupted frames, partial captures, or unusual system states that aren't representative of any real class. Feeding them in as any label would add noise; excluding them is cleaner.
+**`neither` monitor behavior:** When the classifier sees `neither`, it resets both the ad streak and the content streak to zero, then does nothing. The current mute state is held until the classifier returns to a known class. This prevents the monitor from making muting decisions when it has no information (screen showing a recipe doesn't tell you whether an ad was playing on the stream).
 
-**Impact on `train.py` (not yet written):** The multi-class labels require minor adjustments versus the originally planned binary setup:
-- `f1_score(..., average='macro')` instead of `average='binary'`
-- `roc_auc_score(..., multi_class='ovr', average='macro')`
-- Confusion matrix is 3×3
-- At monitor time: `content` and `neither` both map to "don't mute"; only `ad` triggers muting
+**Why `ignore` is excluded from training:** Corrupted frames, partial captures, or unusual system states that aren't representative of any real class.
 
-**Note:** The `n_not_ad` column in the `training_runs` table was designed for binary classification. When implementing `train.py`, this will need updating — either rename it or store `n_content` + `n_neither` separately. The schema may need a migration.
+**`n_not_ad` schema note:** The `training_runs` table has an `n_not_ad` column predating the 3-class taxonomy. It stores `n_content + n_neither` — slightly misleading but harmless since there are no constraints on how the column is interpreted.
 
 ---
 
 ## File Deletion / Privacy
 
-A explicit deletion mechanism was added to handle accidentally capturing sensitive content (passwords, private conversations, etc.).
+An explicit deletion mechanism was added to handle accidentally capturing sensitive content (passwords, private conversations, etc.).
 
-**Behavior:**
-- **`d` key in the labeler grid:** Permanently deletes the selected files from disk (`os.remove`) and removes their DB records. No undo. Irreversible by design.
-- **`d` key in zoom window:** Deletes the current image and advances to the next frame in the page, so multiple sensitive captures can be deleted in one zoom session without closing the window.
-- **Auto-purge on reload:** When `_reload()` runs, it checks `os.path.isfile()` for every DB row and silently removes records for any files that no longer exist on disk. This means you can delete files from the Finder or terminal at any time; the next labeler reload cleans up the DB automatically.
-
-**train.py implication:** Should also skip missing files (`os.path.isfile()` check before feature extraction) as a defensive measure, even though auto-purge should have handled it.
+- **`d` key in the labeler grid:** Permanently deletes selected files from disk and removes DB records. No undo.
+- **`d` key in zoom window:** Deletes current image and advances to the next.
+- **Auto-purge on reload:** `_reload()` checks `os.path.isfile()` for every DB row and removes records for missing files. Files deleted from Finder or terminal are cleaned up on the next reload.
 
 ---
 
 ## `label.py` Key Decisions
 
-**Pagination over scrolling:** 48 thumbnails per page (configurable). Rendering hundreds of images into a scrollable canvas is slow and the scroll position is hard to track. Fixed pages with arrow-key navigation are faster and more predictable for bulk labeling workflows.
+**Pagination over scrolling:** Fixed pages with arrow-key navigation. Rendering hundreds of images into a scrollable canvas is slow and the scroll position is hard to track.
 
-**Background thread for thumbnail loading:** PIL image loading happens in a `threading.Thread`; `ImageTk.PhotoImage` construction happens in the main thread after images arrive via `queue.Queue`. This is required — tkinter is not thread-safe and `PhotoImage` must be created on the main thread. The background thread sets a stop event when the page changes, so stale loads don't clobber a newly rendered page.
+**Dynamic page size:** `n_cols` and `n_rows` computed from `winfo_width()` / `winfo_height()` each render cycle. `_effective_page_size = n_cols * n_rows` is updated accordingly.
 
-**PhotoImage GC pitfall:** All `ImageTk.PhotoImage` objects are stored in `self._photo_refs`. If this list is not maintained, Python's GC collects them and thumbnails go blank with no error message. This is a classic tkinter footgun.
+**Background thread for thumbnail loading:** PIL image loading happens in a `threading.Thread`; `ImageTk.PhotoImage` construction happens in the main thread after images arrive via `queue.Queue`. The background thread sets a stop event when the page changes, so stale loads don't clobber a newly rendered page.
 
-**`_text_widget_focused()` guard:** All single-key shortcuts (`a`, `c`, `n`, `x`, `d`, `z`) are suppressed when a text input widget has focus. Checked via `winfo_class()` returning `'Entry'`, `'TCombobox'`, or `'Text'`. Without this, typing in the search box would accidentally label images.
+**PhotoImage GC pitfall:** All `ImageTk.PhotoImage` objects are stored in `self._photo_refs`. If this list is not maintained, Python's GC collects them and thumbnails go blank with no error message.
 
-**Undo does not cover deletes.** The undo stack tracks label changes only. Deleting a file is irreversible; it is deliberately excluded from the undo mechanism.
+**`_text_widget_focused()` guard:** Single-key shortcuts (`a`, `c`, `n`, `x`, `d`, `z`) are suppressed when a text input widget has focus, checked via `winfo_class()`.
+
+**Fast label update:** `_label_selected()` updates `_all_rows` in-memory rather than calling `_reload()`. This keeps labeling instant even with large datasets.
+
+**Undo does not cover deletes.** The undo stack tracks label changes only.
 
 ---
 
 ## `capture.py` Key Decisions
 
-**`--timeout` flag (default 2 hours):** Added after the user noted that leaving capture running indefinitely after a session would waste disk and potentially capture sensitive content. `time.monotonic()` is used for the deadline (not `datetime.now()`) to be immune to clock adjustments.
+**`--timeout` flag (default 2 hours):** `time.monotonic()` used for the deadline (immune to clock adjustments).
 
-**23-second interval:** Chosen to ensure at least ~2 frames per ad break (typical US ad break: ~30 seconds minimum). Prime number avoids aliasing with any fixed-interval events in the stream.
+**23-second interval:** Ensures at least ~2 frames per ad break (typical US ad break: ~30 seconds minimum). Prime number avoids aliasing with any fixed-interval broadcast events.
 
 **`screencapture -x -t jpg -m`:** `-x` suppresses the camera shutter sound; `-t jpg` for smaller files; `-m` captures only the main monitor. If the stream is on a secondary display, `-m` needs to be replaced with `-D <n>`.
 
 ---
 
-## Audio Detection: Not Pursued
+## `train.py` Key Decisions
 
-Discussed as an alternative to screenshot-based detection. Summary of the analysis:
+**Feature cache:** Keyed by `(extractor_name, n_rows)` with a full path-list comparison for staleness. Re-running `train.py` with the same labeled set skips extraction entirely.
 
-- **Pros:** Crowd noise is a very strong signal (distinctive broadband noise floor present during play, absent during ads); no GPU needed; works with screen covered.
-- **Cons:** Some ads deliberately use stadium sounds; athlete bios/halftime shows have music+voiceover similar to ads; macOS system audio capture requires a virtual audio driver (BlackHole/Loopback) plus routing setup — significant friction.
-- **Conclusion:** Video classification is the right primary approach given the existing infrastructure. Audio as a secondary confirmation signal (both must agree before muting) is worth revisiting after the video classifier is validated. Not worth building now.
+**predict_proba mapping:** `clf.classes_` may not be `[0,1,2]` if a fold happens to lack a class. The code maps each column through `clf.classes_` to a full `[N, 3]` probability matrix before computing metrics.
+
+**Model bundle:** Serialized with `joblib.dump` as a dict containing `classifier`, `extractor` name, `label_map`, `label_names`, `trained_at`, `n_training_samples`. The map is included so `monitor.py` doesn't need to hardcode integer-to-label mappings.
 
 ---
 
-## Remaining Work
+## `monitor.py` Key Decisions
 
-### `train.py`
-
-See `plan.md` §6.4 for the detailed spec. Key points:
-- Filter out `label == 'ignore'` rows before training
-- Filter out rows where the file doesn't exist on disk
-- Handle 3-class labels (`ad`, `content`, `neither`)
-- Map to integers: `ad=0, content=1, neither=2` (or whatever order; just be consistent and document it in the saved model bundle)
-- At monitor time `content` and `neither` → don't mute; `ad` → mute
-- Feature cache keyed by labeled row count to skip re-extraction on reruns
-- Save ROC data as companion `.npz` file
-
-### `monitor.py`
-
-**Revised Feb 28 2026:** monitor is a GUI app, not a headless daemon.
-
-#### Architecture
+### Architecture
 
 - **Main thread:** tkinter window showing rolling frame history + current mute state
-- **Background thread:** capture → classify loop; sends results to main thread via `queue.Queue`
-- `root.after()` polling loop drains the queue and updates the GUI each tick
+- **Background thread:** capture → classify loop; sends `FrameEntry` objects to main thread via `queue.Queue`
+- `root.after(250, _poll_queue)` drains the queue and updates the GUI every 250 ms
 
-#### Pause/resume button
+### Pause/resume button
 
-A **⏸ Pause / ▶ Resume** toggle button in the header freezes both capture and muting. While paused, the grid is static and the user can inspect and correct frames. Pressing Resume restarts the capture loop from where it left off.
+A **⏸ Pause / ▶ Resume** toggle button freezes both capture and muting. The intended workflow: pause, inspect and correct frames, resume, switch back to the stream.
 
-Earlier attempts to auto-pause based on OS-level window focus (`focus_displayof()`, `<FocusIn>`/`<FocusOut>` events) were unreliable on macOS — tkinter's focus model doesn't always track application-level focus correctly. The explicit button is simpler and more predictable.
+Auto-pausing based on OS-level window focus was attempted but proved unreliable on macOS. Both `focus_displayof()` and `<FocusIn>`/`<FocusOut>` event bindings failed to correctly track application-level focus — tkinter's internal focus model diverges from the OS model after `root.focus_set()` is called. The explicit button is simpler and more predictable.
 
-#### Rolling history display
+**Implementation note:** `tk.Button` ignores `bg`/`fg` on macOS (native Aqua appearance). A `tk.Label` with a `<Button-1>` binding is used instead — labels do respect color settings.
 
-- Keep a `deque(maxlen=N)` of recent frames (default: 24 frames ≈ 2 min at 5 s interval)
-- Each frame record stores: `{path, label, prob_ad, captured_at}`
-- Display as a horizontal strip or grid of thumbnails, newest first
-- Color-coded border: red = ad, green = content/neither, yellow = uncertain (max prob < 0.80)
-- Show current mute state prominently (e.g. "MUTED" in red / "LIVE" in green) in a header bar
+### Hysteresis state machine
 
-#### In-app relabeling
+- `MUTE_DELAY = 2` consecutive `ad` frames before muting (10 s at 5 s interval)
+- `UNMUTE_DELAY = 3` consecutive `content` frames before unmuting (15 s)
+- `neither` resets both streaks to zero; current mute state is held unchanged
 
-- Single-click a thumbnail to select it
-- a / c / n / x keys relabel the selected frame and save to DB via `store.set_label()`
-- Relabeled frames are saved with `source='monitor'` so they show up in the next `label.py` / `train.py` cycle
-- No undo needed (correction workflow, not bulk labeling)
+### User override detection
 
-#### Hysteresis state machine
+Uses `osascript` to check system mute state. If we muted the system and it's no longer muted (user manually unmuted), set `_override = True` and disengage. Override clears after `UNMUTE_DELAY` consecutive content frames.
 
-- `MUTE_DELAY = 2` consecutive ad frames before muting (10 s at 5 s interval)
-- `UNMUTE_DELAY = 3` consecutive non-ad frames before unmuting (15 s)
-- Only `ad` class triggers muting; `content` and `neither` both count as non-ad
+### Frame storage policy
 
-#### User override detection
+Monitor screenshots are temporary. Stored in `tempfile.mkdtemp()` while in the rolling history deque. When a frame is evicted (scrolls off), its temp file is deleted unless `entry.relabeled` is True. Only frames the user explicitly corrects are moved to `hard_frames/` and written to the DB — disk usage stays bounded regardless of session length.
 
-- Record the volume level set when muting
-- Before each unmute decision, check current system volume via osascript
-- If it differs from what we set (user manually changed it), set a `_override` flag and stop interfering until the next mute cycle
+---
 
-#### Frame storage policy
+## Multi-sport Model Strategy
 
-Screenshots taken by the monitor are **temporary by default**:
-- Stored in a temp dir (`tempfile.mkdtemp()`) while they're in the rolling history
-- When a frame is evicted from the history deque (scrolls off), its temp file is deleted — **unless** the user relabeled it
-- Each history entry carries a `relabeled: bool` flag; eviction checks this flag before deleting
+Current training data is from UFC (ESPN). For future sports (e.g. baseball):
 
-When the user relabels a frame:
-- Move the temp file to `hard_frames/` (permanent storage)
-- Write a DB record via `store.add_screenshot()` + `store.set_label()` with `source='monitor'`
-- Now it's training data for the next `label.py` / `train.py` cycle
+**Recommended: combine training data across sports.** The classifier learns "commercial production aesthetic vs. broadcast production aesthetic," not what sport is being played. Ads are largely consistent across networks; content looks different (octagon vs. diamond) but both are unambiguously "not ads" to a ResNet-50 feature extractor.
 
-Disk usage stays bounded regardless of how long the monitor runs. Only errors the user explicitly corrects are kept.
+If combining causes accuracy to drop (check cross-validation AUC after adding new sport data), split into per-sport models — the `--model` CLI flag already supports this.
 
-#### Other
+Potential failure mode: large class imbalance at the sport level within the `content` class. `class_weight='balanced'` handles ad/content imbalance but not sport-level imbalance within content. Watch for this in the confusion matrix if accuracy degrades.
 
-- Unmute on clean exit (window close or SIGTERM)
-- CLI: `--model`, `--db`, `--interval`, `--ad-threshold`, `--content-threshold`, `--history-size`, `--hard-frame-dir`
+---
 
-### Schema note for `training_runs`
+## Audio Detection: Not Pursued
 
-The `n_not_ad` column in the DB predates the 3-class taxonomy. Options when implementing `train.py`:
-1. Keep `n_not_ad` and store `n_content + n_neither` in it (simplest, slightly misleading)
-2. Add `n_content` and `n_neither` columns via `ALTER TABLE` and keep `n_not_ad` for backwards compatibility
-3. Store counts as a JSON blob in a new `class_counts` column
-
-Option 1 is fine for now since there are no existing training run records.
+- **Pros:** Crowd noise is a strong signal; no GPU needed; works with screen covered.
+- **Cons:** Some ads use stadium sounds; halftime/bios have music similar to ads; macOS audio capture requires a virtual driver (BlackHole/Loopback) — significant setup friction.
+- **Conclusion:** Video classification is the right primary approach. Audio as a secondary confirmation signal is worth revisiting after the video classifier is validated in real use.
