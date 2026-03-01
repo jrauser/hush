@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# User data — not committed
+hush.db
+screenshots/
+hard_frames/
+
+# Generated artifacts
+models/
+feature_cache_*.npy
+feature_cache_*.json
+roc.png
+
+# macOS
+.DS_Store
