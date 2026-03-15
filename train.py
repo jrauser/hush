@@ -96,7 +96,7 @@ def main():
     parser.add_argument('--db',         default='hush.db')
     parser.add_argument('--model-out',  default='models/classifier.joblib')
     parser.add_argument('--extractor',  default='resnet50', choices=['resnet50'])
-    parser.add_argument('--classifier', default='rf', choices=['rf', 'gbm'])
+    parser.add_argument('--classifier', default='gbm', choices=['rf', 'gbm'])
     parser.add_argument('--n-folds',    type=int, default=5)
     parser.add_argument('--notes',      default=None)
     args = parser.parse_args()
