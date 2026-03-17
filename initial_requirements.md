@@ -24,7 +24,7 @@ This part of the system might choose to write difficult to classify frames out f
 
 Update Feb 28, 2026:
 
-It occurs to me that during the operation of the phase 2 monitor, I need a way to inspect it's operation and correct errors.  Here's what I'm imagining.  The monitor has a simple GUI.  When the monitor app is in the foreground it's operation is suspended, it only takes screenshots and mutes/unmutes when it's window doesn't have focus.
+It occurs to me that during the operation of the phase 2 monitor, I need a way to inspect its operation and correct errors.  Here's what I'm imagining.  The monitor has a simple GUI.  When the monitor app is in the foreground it's operation is suspended, it only takes screenshots and mutes/unmutes when it's window doesn't have focus.
 
 The monitor stores and displays the last few screenshots, maybe a minute or two's worth.  If I'm watching a stream and the classifier makes a mistake, I can switch over to the monitor, find the frame it misclassified and hand classify it right then and there.  Then swap back to the content and let it keep going.
 
