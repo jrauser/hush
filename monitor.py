@@ -646,13 +646,13 @@ _WEB_HTML = """<!DOCTYPE html>
     border-bottom: 1px solid #34495e;
   }
   #label-bar.visible { display: flex; }
-  #label-bar span { font-size: 0.8rem; color: #bdc3c7; align-self: center; }
+  #label-bar span { font-size: 0.8rem; color: #bdc3c7; align-self: center; width: 100%; }
   .lbtn {
     flex: 1; min-width: 60px; padding: 10px 4px;
     border: none; border-radius: 6px; font-size: 0.9rem; font-weight: bold;
     cursor: pointer; color: white;
   }
-  .lbtn.ad      { background: #c0392b; }
+  .lbtn.mute    { background: #c0392b; }
   .lbtn.content { background: #27ae60; }
   .lbtn.neither { background: #7f8c8d; }
   .lbtn.ignore  { background: #8e44ad; }
@@ -675,7 +675,7 @@ _WEB_HTML = """<!DOCTYPE html>
   }
   .cell.selected { border-color: #f1c40f !important; }
 
-  .label-ad      { border-color: #c0392b; background: #c0392b; }
+  .label-mute    { border-color: #c0392b; background: #c0392b; }
   .label-content { border-color: #27ae60; background: #27ae60; }
   .label-neither { border-color: #7f8c8d; background: #7f8c8d; }
   .label-ignore  { border-color: #8e44ad; background: #8e44ad; }
@@ -692,7 +692,7 @@ _WEB_HTML = """<!DOCTYPE html>
 </div>
 <div id="label-bar">
   <span id="sel-name"></span>
-  <button class="lbtn ad"      onclick="relabel('ad')">Ad</button>
+  <button class="lbtn mute"    onclick="relabel('ad')">Ad</button>
   <button class="lbtn content" onclick="relabel('content')">Content</button>
   <button class="lbtn neither" onclick="relabel('neither')">Neither</button>
   <button class="lbtn ignore"  onclick="relabel('ignore')">Ignore</button>
@@ -751,7 +751,8 @@ function render(d) {
 
   for (const f of d.frames) {
     const cell = document.createElement('div');
-    cell.className = 'cell label-' + f.display_label;
+    const css_label = f.display_label === 'ad' ? 'mute' : f.display_label;
+    cell.className = 'cell label-' + css_label;
     if (f.uncertain) cell.classList.add('uncertain');
     if (f.fname === prevSelected) cell.classList.add('selected');
 
