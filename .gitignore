@@ -2,7 +2,9 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 .venv/
+.pytest_cache/
 
 # User data — not committed
 hush.db

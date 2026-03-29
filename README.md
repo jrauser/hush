@@ -28,7 +28,7 @@ Hard-to-classify frames from Phase 2 are saved automatically for relabeling. Aft
 
 ```bash
 uv venv --python python3.13 .venv
-uv pip install -r requirements.txt
+uv pip install -e ".[dev]"
 ```
 
 ---
@@ -39,10 +39,10 @@ uv pip install -r requirements.txt
 
 ```bash
 # Terminal 1 — capture while watching a stream (stops automatically after 2 hours)
-.venv/bin/python capture.py
+.venv/bin/python -m hush.capture
 
 # After capturing, open the labeler
-.venv/bin/python label.py
+.venv/bin/python -m hush.label
 ```
 
 Label enough frames to cover the variety of content you watch:
@@ -55,7 +55,7 @@ Aim for at least 100–200 ad frames before training. The more variety the bette
 
 ```bash
 # Train the classifier (downloads ResNet-50 weights ~100MB on first run)
-.venv/bin/python train.py
+.venv/bin/python -m hush.train
 ```
 
 Check the cross-validation output. AUC > 0.95 is good. If accuracy is low, label more frames and retrain.
@@ -64,14 +64,14 @@ Check the cross-validation output. AUC > 0.95 is good. If accuracy is low, label
 
 ```bash
 # Run in the background while streaming
-.venv/bin/python monitor.py &
+.venv/bin/python -m hush.monitor &
 ```
 
 After each streaming session, relabel any hard frames the monitor saved and retrain:
 
 ```bash
-.venv/bin/python label.py    # hard frames appear automatically
-.venv/bin/python train.py    # retrain with expanded dataset
+.venv/bin/python -m hush.label    # hard frames appear automatically
+.venv/bin/python -m hush.train    # retrain with expanded dataset
 # restart monitor to load the new model
 ```
 
@@ -79,10 +79,10 @@ After each streaming session, relabel any hard frames the monitor saved and retr
 
 ## Command reference
 
-### `capture.py`
+### capture
 
 ```
-.venv/bin/python capture.py [options]
+.venv/bin/python -m hush.capture [options]
 
   --interval SECONDS   Screenshot interval (default: 23)
   --timeout HOURS      Stop after this many hours; 0 = unlimited (default: 2)
@@ -90,10 +90,10 @@ After each streaming session, relabel any hard frames the monitor saved and retr
   --db FILE            SQLite database (default: hush.db)
 ```
 
-### `label.py`
+### label
 
 ```
-.venv/bin/python label.py [options]
+.venv/bin/python -m hush.label [options]
 
   --db FILE            SQLite database (default: hush.db)
   --thumb-size PX      Thumbnail size in pixels (default: 150)
@@ -121,10 +121,10 @@ In the zoom window, A/C/N/X relabel the current image and close; D deletes and a
 
 Reload re-reads the database and filesystem. Any screenshot files deleted outside the app are automatically removed from the database on the next reload.
 
-### `train.py`
+### train
 
 ```
-.venv/bin/python train.py [options]
+.venv/bin/python -m hush.train [options]
 
   --db FILE            SQLite database (default: hush.db)
   --model-out FILE     Where to save the model (default: models/classifier.joblib)
@@ -138,10 +138,10 @@ Feature extraction results are cached in `feature_cache/`. Re-running `train.py`
 
 Output includes a per-fold table (accuracy, F1, AUC) and a confusion matrix. ROC curve data is saved alongside the model as `models/classifier_roc.npz`.
 
-### `monitor.py`
+### monitor
 
 ```
-.venv/bin/python monitor.py [options]
+.venv/bin/python -m hush.monitor [options]
 
   --model FILE         Trained model (default: models/classifier.joblib)
   --db FILE            SQLite database (default: hush.db)
@@ -179,13 +179,19 @@ The monitor unmutes cleanly on window close or SIGTERM. If you manually unmute w
 
 ```
 hush/
-├── capture.py           Phase 1: screenshot capture loop
-├── label.py             Phase 1: labeling GUI
-├── train.py             Feature extraction + classifier training
-├── monitor.py           Phase 2: muting daemon with correction GUI
-├── label_store.py       Shared SQLite persistence layer
-├── plot_roc.py          ROC curve plotting utility
-├── requirements.txt
+├── pyproject.toml
+├── src/
+│   └── hush/
+│       ├── capture.py       Phase 1: screenshot capture loop
+│       ├── label.py         Phase 1: labeling GUI
+│       ├── train.py         Feature extraction + classifier training
+│       ├── monitor.py       Phase 2: muting daemon with correction GUI
+│       ├── mute_fsm.py      Mute state machine (used by monitor)
+│       ├── label_store.py   Shared SQLite persistence layer
+│       └── plot_roc.py      ROC curve plotting utility
+├── tests/
+│   ├── test_label_store.py
+│   └── test_mute_fsm.py
 ├── hush.db              SQLite database (created at runtime)
 ├── screenshots/         Training screenshots
 ├── hard_frames/         Frames relabeled in monitor (for retraining)
@@ -193,6 +199,14 @@ hush/
 │   ├── classifier.joblib
 │   └── classifier_roc.npz
 └── feature_cache/       Cached ResNet-50 features (safe to delete)
+```
+
+---
+
+## Running tests
+
+```bash
+.venv/bin/python -m pytest tests/ -v
 ```
 
 ---

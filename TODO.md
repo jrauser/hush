@@ -14,14 +14,6 @@ The current `screencapture` approach grabs whatever is on screen, so it captures
 - Audio-based features (volume spikes, crowd noise) could be a useful second signal but aren't required for the initial version
 - Extension itself would be ~50 lines of JS
 
-## Unit tests
-
-Two areas with real testable logic:
-
-**`label_store.py`** — CRUD against SQLite. Test with `:memory:` DB, no mocks. Covers bulk labeling, duplicate handling, `get_unlabeled`/`get_labeled` filters, `delete_screenshots`, training run recording.
-
-**Mute state machine** (`monitor.py`) — streak tracking, override detection, mute/unmute transitions, pause behavior. Currently embedded in `MonitorApp`; extract into a standalone class so it can be tested without Tkinter or subprocesses. Key edge cases: user override mid-ad-streak, pause/resume resets, `neither` resetting both streaks, unmute delay after override clears.
-
 ## Store feature vectors in SQLite
 
 The current feature cache (`feature_cache/`) uses flat files keyed by extractor name + sample count. This is fragile — adding one label invalidates the entire cache and forces re-extraction of all images. Moving features into the database enables incremental extraction and eliminates cache file management.
@@ -84,3 +76,7 @@ Implemented as a Flask server in `monitor.py` with `--web-port` flag.
 ## Upgrade to Python 3.13 + modern dependencies (v1.1, 2026-03-29)
 
 Migrated to arm64 Homebrew (`/opt/homebrew`), Python 3.13.12, torch 2.11.0, numpy 2.4.4. See `implementation_notes.md` for details.
+
+## Unit tests + package layout (v1.1, 2026-03-29)
+
+Reorganized into `src/hush/` package with `pyproject.toml`. Extracted `MuteFSM` from `monitor.py`. 29 tests (label_store + mute_fsm), zero mocks.

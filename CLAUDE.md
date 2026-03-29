@@ -26,3 +26,7 @@ Below is the plan for a normal engagement.  If we discover major new requirement
 * During implementation, document deviations from the plan, surprising technical constraints, and non-obvious design decisions in `implementation_notes.md`.
 * At the end I may ask you to write a `postmortem.md` with a summary of everything we did and learned through the course of the project.
 * After changing behavior, consider impact on README.md and any other documentation.
+
+** Testing **
+
+* After any work, verify that tests pass.  Run ruff and fix any complaints.

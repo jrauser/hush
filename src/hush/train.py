@@ -18,7 +18,7 @@ from sklearn.metrics import confusion_matrix, f1_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from tqdm import tqdm
 
-from label_store import LabelStore
+from hush.label_store import LabelStore
 
 # Labels included in training (exclude 'ignore')
 LABEL_MAP   = {'ad': 0, 'content': 1, 'neither': 2}

@@ -31,7 +31,8 @@ import torchvision.transforms as transforms
 from PIL import Image, ImageTk
 import tkinter as tk
 
-from label_store import LabelStore
+from hush.label_store import LabelStore
+from hush.mute_fsm import MuteFSM
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -128,15 +129,11 @@ class MonitorApp:
         self._history_lock = threading.Lock()
         self._temp_dir     = tempfile.mkdtemp(prefix='hush_monitor_')
 
-        # Mute state machine
-        self._muted     = False   # are we currently muted?
-        self._we_muted  = False   # did *we* issue the mute (vs user)?
-        self._override  = False   # user manually changed volume; hands off
-        self._ad_streak = 0       # consecutive ad-classified frames
-        self._ok_streak = 0       # consecutive non-ad-classified frames
-
-        # Pause state — capture and muting both stop while paused
-        self._paused = False
+        # Mute state machine (pure logic; see mute_fsm.py)
+        self._fsm = MuteFSM(
+            mute_delay=args.mute_delay,
+            unmute_delay=args.unmute_delay,
+        )
 
         # UI state
         self._selected   = None   # path of selected FrameEntry, or None
@@ -153,7 +150,7 @@ class MonitorApp:
 
         # Key bindings
         for key, lbl in [('a', 'ad'), ('c', 'content'), ('n', 'neither'), ('x', 'ignore')]:
-            self.root.bind(key, lambda e, l=lbl: self._relabel_selected(l))
+            self.root.bind(key, lambda e, label=lbl: self._relabel_selected(label))
         self.root.bind('<Escape>', lambda e: self._deselect())
 
         # SIGTERM → clean shutdown on main thread
@@ -214,7 +211,10 @@ class MonitorApp:
     # ── pause toggle ──────────────────────────────────────────────────────────
 
     def _toggle_pause(self):
-        self._paused = not self._paused
+        if self._fsm._paused:
+            self._fsm.resume()
+        else:
+            self._fsm.pause()
         self._update_header()
 
     # ── background capture loop ───────────────────────────────────────────────
@@ -222,7 +222,7 @@ class MonitorApp:
     def _capture_loop(self):
         seq = 0
         while self._running:
-            if self._paused:
+            if self._fsm._paused:
                 time.sleep(0.25)
                 continue
 
@@ -298,56 +298,21 @@ class MonitorApp:
 
         self._history.append(entry)
 
-        # Update streaks.
-        # 'neither' (tabbed away) resets both — the monitor can't know what's
-        # happening so it holds the current mute state and starts fresh when
-        # known content resumes.
-        if entry.pred_label == 'ad':
-            self._ad_streak += 1
-            self._ok_streak  = 0
-        elif entry.pred_label == 'content':
-            self._ok_streak  += 1
-            self._ad_streak   = 0
-        else:  # 'neither'
-            self._ad_streak = 0
-            self._ok_streak = 0
+        # Detect user override: we muted, but user manually unmuted
+        user_unmuted = (
+            self._fsm.muted
+            and not self._test_mode
+            and not _get_muted()
+        )
 
-        self._update_mute_state()
+        action = self._fsm.update(entry.pred_label, user_unmuted=user_unmuted)
+        if action == 'mute' and not self._test_mode:
+            _set_muted(True)
+        elif action == 'unmute' and not self._test_mode:
+            _set_muted(False)
+
         self._render()
         self._update_header()
-
-    # ── mute state machine ────────────────────────────────────────────────────
-
-    def _update_mute_state(self):
-        # Never touch volume while paused
-        if self._paused:
-            return
-
-        # Check for user override (they manually unmuted while we had it muted)
-        if self._we_muted and not self._test_mode and not _get_muted():
-            self._override  = True
-            self._muted     = False
-            self._we_muted  = False
-            self._ad_streak = 0    # don't immediately re-mute
-            return
-
-        if self._override:
-            # Wait for a clean run of content before re-engaging
-            if self._ok_streak >= self.args.unmute_delay:
-                self._override = False
-            return
-
-        if not self._muted and self._ad_streak >= self.args.mute_delay:
-            if not self._test_mode:
-                _set_muted(True)
-            self._muted    = True
-            self._we_muted = True
-
-        elif self._muted and self._ok_streak >= self.args.unmute_delay:
-            if not self._test_mode:
-                _set_muted(False)
-            self._muted    = False
-            self._we_muted = False
 
     # ── rendering ─────────────────────────────────────────────────────────────
 
@@ -441,14 +406,14 @@ class MonitorApp:
     # ── header update ─────────────────────────────────────────────────────────
 
     def _update_header(self):
-        if self._paused:
+        if self._fsm._paused:
             self._pause_btn.config(text='▶  Resume', bg='#c0392b')
             self._status_lbl.config(text='PAUSED', fg='#e67e22')
         else:
             self._pause_btn.config(text='⏸  Pause', bg='#2c3e50')
-            if self._override:
+            if self._fsm.override:
                 self._status_lbl.config(text='OVERRIDE', fg='#e67e22')
-            elif self._muted:
+            elif self._fsm.muted:
                 self._status_lbl.config(text='MUTED',    fg='#e74c3c')
             else:
                 self._status_lbl.config(text='LIVE',     fg='#2ecc71')
@@ -458,8 +423,8 @@ class MonitorApp:
             self._info_lbl.config(
                 text=(
                     f'last: {last.pred_label} ({last.prob_ad:.0%} ad)'
-                    f'  ·  ad streak: {self._ad_streak}'
-                    f'  ·  ok streak: {self._ok_streak}'
+                    f'  ·  ad streak: {self._fsm.ad_streak}'
+                    f'  ·  ok streak: {self._fsm.ok_streak}'
                 )
             )
 
@@ -490,11 +455,11 @@ class MonitorApp:
 
         @app.route('/api/state')
         def api_state():
-            if self._paused:
+            if self._fsm._paused:
                 status = 'PAUSED'
-            elif self._override:
+            elif self._fsm.override:
                 status = 'OVERRIDE'
-            elif self._muted:
+            elif self._fsm.muted:
                 status = 'MUTED'
             else:
                 status = 'LIVE'
@@ -521,8 +486,8 @@ class MonitorApp:
                 'status':     status,
                 'last_label': last.pred_label if last else None,
                 'prob_ad':    round(last.prob_ad, 4) if last else None,
-                'ad_streak':  self._ad_streak,
-                'ok_streak':  self._ok_streak,
+                'ad_streak':  self._fsm.ad_streak,
+                'ok_streak':  self._fsm.ok_streak,
                 'frames':     frames,
             })
 
@@ -584,7 +549,7 @@ class MonitorApp:
 
     def _on_close(self):
         self._running = False
-        if self._muted and self._we_muted and not self._test_mode:
+        if self._fsm.muted and not self._test_mode:
             _set_muted(False)
         self._cleanup()
         try:

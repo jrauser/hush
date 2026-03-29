@@ -1,6 +1,8 @@
-# Hush v1.1: Upgrade to Python 3.13 + Modern Dependencies
+# Hush v1.1 Plan
 
-## Goal
+## Part 1: Upgrade to Python 3.13 + Modern Dependencies
+
+### Goal
 
 Remove version pins that were only necessary for the original Intel Mac environment. The project now runs on Apple Silicon (M5 Pro, arm64), where PyTorch 2.5+ has native wheels and numpy 2.x is fully supported. Upgrading to Python 3.13 with unpinned dependencies gets us current libraries, better performance (MPS improvements in recent torch releases), and eliminates the fragile version ceiling that would rot over time.
 
@@ -173,3 +175,200 @@ The old `.venv` (Python 3.12) remains until step 7. If anything fails that can't
 Completed successfully. The Homebrew migration from x86_64 (`/usr/local`) to arm64 (`/opt/homebrew`) was an unplanned prerequisite — the existing `python@3.13` was an x86_64 build carried over from an Intel laptop migration, and PyTorch has no x86_64 macOS wheels for 2.5+.
 
 All smoke tests passed. The existing trained model and feature cache loaded across the numpy 1.x → 2.x boundary without issues. Retraining produced equivalent CV metrics. See `implementation_notes.md` for full details.
+
+---
+
+## Part 2: Unit Tests + Package Layout
+
+### Goal
+
+Add unit tests for the two components with real testable logic (`label_store.py` and the mute state machine), and reorganize the project into a proper Python package layout. The package layout is a prerequisite for the eventual PyPI distribution but is worth doing now because it gives tests a clean import structure and puts us on standard tooling (`pyproject.toml`, `pytest`).
+
+---
+
+### Package Layout
+
+Reorganize from flat files in the project root to a proper package:
+
+```
+hush/
+├── pyproject.toml              # replaces requirements.txt
+├── src/
+│   └── hush/
+│       ├── __init__.py
+│       ├── label_store.py
+│       ├── mute_fsm.py         # extracted from monitor.py
+│       ├── capture.py
+│       ├── label.py
+│       ├── train.py
+│       ├── monitor.py
+│       └── plot_roc.py
+├── tests/
+│   ├── conftest.py             # shared fixtures (e.g. in-memory LabelStore)
+│   ├── test_label_store.py
+│   └── test_mute_fsm.py
+├── plan_v1.0.md
+├── plan_v1.1.md
+├── initial_requirements.md
+├── implementation_notes.md
+├── README.md
+├── TODO.md
+└── CLAUDE.md
+```
+
+**Key decisions:**
+
+- **`src/` layout.** Prevents accidental imports from the working directory. `pytest` discovers packages under `src/` via `pyproject.toml` config. This is the recommended layout for any package that may eventually be installed.
+- **`pyproject.toml` replaces `requirements.txt`.** Dependencies move to `[project.dependencies]`. Dev dependencies (pytest) go in `[project.optional-dependencies]`. The `requirements.txt` file is deleted.
+- **No entry points yet.** Scripts are still run as `python -m hush.capture`, etc. Entry points (`[project.scripts]`) are deferred to the PyPI distribution TODO, which also requires picking a new package name.
+- **Internal imports change.** E.g. `from label_store import LabelStore` → `from hush.label_store import LabelStore`. Every `.py` file that imports `label_store` needs this update (`capture.py`, `label.py`, `train.py`, `monitor.py`).
+
+**`pyproject.toml` sketch:**
+
+```toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hush"
+version = "1.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "Pillow>=10.0",
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+    "numpy>=2.0",
+    "tqdm>=4.0",
+    "flask>=3.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+```
+
+---
+
+### Extract `MuteFSM` from `monitor.py`
+
+The mute state machine is currently woven into `MonitorApp` (lines 131–350 of `monitor.py`). It reads `self.args.mute_delay`, `self.args.unmute_delay`, `self._test_mode`, `self._paused`, and calls `_set_muted()` / `_get_muted()` — all of which couple it to the GUI and OS.
+
+Extract into `mute_fsm.py` as a pure-logic class with no dependencies on tkinter, subprocess, or argparse:
+
+```python
+class MuteFSM:
+    """Streak-based mute state machine.
+
+    Call update() with each new predicted label. Query state via
+    properties. The FSM never touches audio — it only decides.
+    The caller (MonitorApp) acts on the decision.
+    """
+
+    def __init__(self, mute_delay=2, unmute_delay=3):
+        self.mute_delay   = mute_delay
+        self.unmute_delay = unmute_delay
+        self.muted        = False
+        self.override     = False
+        self.ad_streak    = 0
+        self.ok_streak    = 0
+
+    def update(self, pred_label: str, user_unmuted: bool = False) -> str | None:
+        """Feed one frame's prediction. Returns 'mute', 'unmute', or None."""
+        ...
+
+    def pause(self):
+        """Enter paused state. update() becomes a no-op."""
+        ...
+
+    def resume(self):
+        """Leave paused state."""
+        ...
+```
+
+**Design principle:** The FSM is a pure function of its inputs. It returns *what to do* ('mute', 'unmute', or None) rather than doing it. `MonitorApp._update_mute_state()` becomes a thin wrapper:
+
+```python
+action = self._fsm.update(entry.pred_label, user_unmuted=<check>)
+if action == 'mute':
+    _set_muted(True)
+elif action == 'unmute':
+    _set_muted(False)
+```
+
+This makes the FSM fully testable without mocking anything.
+
+---
+
+### Unit Tests
+
+**Framework:** `pytest`. No plugins needed. Run with:
+
+```bash
+.venv/bin/python -m pytest tests/ -v
+```
+
+#### `test_label_store.py`
+
+All tests use an in-memory SQLite database (`:memory:`). No mocks, no filesystem. Shared fixture in `conftest.py`:
+
+```python
+@pytest.fixture
+def store():
+    return LabelStore(":memory:")
+```
+
+**Test cases:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_add_and_retrieve` | `add_screenshot` returns rowid; `get_all` returns it; fields match |
+| `test_duplicate_filename_rejected` | Second `add_screenshot` with same filename raises `IntegrityError` |
+| `test_get_unlabeled_vs_labeled` | After labeling some, `get_unlabeled` and `get_labeled` partition correctly |
+| `test_set_label` | `set_label` updates label and sets `labeled_at` |
+| `test_set_labels_bulk` | Bulk label N files at once; all updated |
+| `test_clear_labels_bulk` | Undo: clears label and labeled_at back to NULL |
+| `test_delete_screenshots` | Rows removed from DB; `get_all` no longer returns them |
+| `test_get_by_filename_exists` | Returns dict for known file |
+| `test_get_by_filename_missing` | Returns None for unknown file |
+| `test_record_training_run` | Insert a training run; verify it's queryable and fields round-trip |
+| `test_record_training_run_dict_cm` | Pass confusion_matrix as dict; stored as JSON string |
+| `test_label_values` | Only 'ad', 'content', 'neither', 'ignore' are used in practice (not enforced by schema, but test the workflow) |
+
+#### `test_mute_fsm.py`
+
+Pure unit tests — no I/O, no mocks.
+
+**Test cases:**
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_initial_state` | Starts unmuted, no override, streaks at 0 |
+| `test_mute_after_delay` | N consecutive 'ad' frames → returns 'mute' on the Nth |
+| `test_no_mute_below_delay` | N-1 consecutive 'ad' frames → still None |
+| `test_unmute_after_delay` | After muting, M consecutive 'content' frames → returns 'unmute' |
+| `test_no_unmute_below_delay` | M-1 content frames → still muted |
+| `test_neither_resets_both_streaks` | 'neither' after ad streak resets ad_streak; mute doesn't fire |
+| `test_neither_holds_muted_state` | Already muted + 'neither' → stays muted, ok_streak reset |
+| `test_ad_resets_ok_streak` | Alternating ad/content never reaches either threshold |
+| `test_user_override` | After muting, `user_unmuted=True` → override mode; stops returning 'mute' |
+| `test_override_clears_after_content_run` | Override + unmute_delay content frames → override clears, normal behavior resumes |
+| `test_pause_suppresses_actions` | While paused, update() always returns None regardless of streaks |
+| `test_resume_continues_from_state` | Pause then resume; accumulated streaks preserved (or reset — match current behavior) |
+| `test_mute_unmute_cycle` | Full ad-break → content cycle; verify mute then unmute |
+
+---
+
+### Implementation Order
+
+1. **Create `pyproject.toml`; move source files into `src/hush/`; update imports.** Verify everything still runs (`python -m hush.capture`, etc.).
+2. **Extract `MuteFSM` into `src/hush/mute_fsm.py`.** Update `monitor.py` to use it. Verify monitor still works.
+3. **Write `tests/test_label_store.py`.** Run, fix any issues found.
+4. **Write `tests/test_mute_fsm.py`.** Run, fix any issues found.
+5. **Delete `requirements.txt`.** Update README and implementation_notes.
+6. **Update `.gitignore`** if needed (e.g. `*.egg-info/`).

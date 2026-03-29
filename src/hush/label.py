@@ -8,7 +8,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageTk
 
-from label_store import LabelStore
+from hush.label_store import LabelStore
 
 # ── visual constants ──────────────────────────────────────────────────────────
 
@@ -465,7 +465,7 @@ class LabelApp:
         if to_clear:
             self.store.clear_labels_bulk(to_clear)
         for lbl in ('ad', 'content', 'neither', 'ignore'):
-            subset = [f for f, l in old_labels.items() if l == lbl]
+            subset = [f for f, old in old_labels.items() if old == lbl]
             if subset:
                 self.store.set_labels_bulk(subset, lbl)
         self._reload()

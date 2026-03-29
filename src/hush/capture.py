@@ -6,7 +6,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from label_store import LabelStore
+from hush.label_store import LabelStore
 
 DEFAULT_INTERVAL = 23
 DEFAULT_TIMEOUT_HOURS = 2

@@ -13,6 +13,8 @@ Checkpoint document recording decisions made, problems encountered, and deviatio
 | `label.py` | Done |
 | `train.py` | Done |
 | `monitor.py` | Done |
+| `mute_fsm.py` | Done |
+| `tests/` | Done (29 tests) |
 
 All components implemented. Git repo initialized with initial commit `e28ffe4`.
 
@@ -232,6 +234,22 @@ No code changes required. All six scripts (`capture.py`, `label.py`, `label_stor
 ### Model and feature cache compatibility
 
 The existing `models/classifier.joblib` (trained under numpy 1.26.4) loaded successfully under numpy 2.4.4. The feature cache (`feature_cache/`) also loaded without issues. Retraining produced comparable CV metrics (AUC 0.986 vs. prior 0.993 — within normal fold variance).
+
+---
+
+## Package Layout and MuteFSM Extraction (v1.1)
+
+### src/ layout
+
+Moved all source into `src/hush/` with `pyproject.toml`. The restructure required no code changes beyond updating `from label_store import` → `from hush.label_store import` in four files. Everything else — tkinter, subprocess calls, relative file paths for screenshots/models/DB — worked as-is because those paths are resolved at runtime from the working directory, not relative to the module.
+
+### MuteFSM: returns actions, doesn't perform them
+
+The mute state machine was extracted from `MonitorApp` into a standalone class that takes `(pred_label, user_unmuted)` and returns `'mute'`, `'unmute'`, or `None`. It never calls `osascript`, never checks system volume, never touches tkinter. `MonitorApp._on_new_frame()` does the override detection (reading system mute state) and passes the result in, then acts on whatever the FSM returns.
+
+This made the FSM fully testable with zero mocks — 15 tests covering all edge cases run in <1ms.
+
+One minor wart: `MonitorApp` accesses `self._fsm._paused` (a private attribute) to check pause state in the capture loop and header rendering. Adding a `@property` felt like ceremony for an internal collaborator, but if `MuteFSM` ever gets used elsewhere this should be cleaned up.
 
 ---
 
