@@ -27,37 +27,30 @@ All components implemented. Git repo initialized with initial commit `e28ffe4`.
 - Python 3.13/3.14 can't be used because PyTorch dropped macOS `x86_64` wheels at v2.5.0, and 3.13 wheels only exist from 2.5.0 onward — the constraints are mutually exclusive on this Intel Mac.
 - **Solution:** Python 3.12 + `python-tk@3.12`, which links against tcl-tk 9.0.3. Supports PyTorch up to 2.4.1.
 
-**Current venv:** `/Users/jrauser/code/hush/.venv` — Python 3.12.12
+**Current venv:** `/Users/jrauser/code/hush/.venv` — Python 3.13.12 (arm64, via `/opt/homebrew`)
 
 ```bash
-uv venv --python python3.12 .venv
+uv venv --python python3.13 .venv
 uv pip install -r requirements.txt
 ```
 
 ### Installed package versions
 
 ```
-torch==2.2.2
-torchvision==0.17.2
-numpy==1.26.4        # must be 1.x; torch 2.2.x breaks with numpy 2.x
+torch==2.11.0
+torchvision==0.26.0
+numpy==2.4.4
 Pillow==12.1.1
 scikit-learn==1.8.0
 scipy==1.17.1
 joblib==1.5.3
 tqdm==4.67.3
-matplotlib            # added later for plot_roc.py
-tkinter (tcl/tk 9.0.3, via python-tk@3.12)
+matplotlib==3.10.8
+flask==3.1.3
+tkinter (tcl/tk 9.0.3, via python-tk@3.13)
 ```
 
-### requirements.txt upper bounds
-
-```
-torch>=2.0,<2.5      # 2.5+ dropped macOS x86_64 wheels
-torchvision>=0.15,<0.20
-numpy>=1.24,<2       # torch <2.5 requires numpy 1.x
-```
-
-Note: this machine has Apple Silicon (MPS available), not Intel x86_64 as originally assumed. Feature extraction runs on MPS.
+This machine is Apple Silicon (M5 Pro). Feature extraction runs on MPS.
 
 ### ResNet-50 weights: SSL workaround
 
@@ -204,6 +197,41 @@ Current training data is from UFC (ESPN). For future sports (e.g. baseball):
 If combining causes accuracy to drop (check cross-validation AUC after adding new sport data), split into per-sport models — the `--model` CLI flag already supports this.
 
 Potential failure mode: large class imbalance at the sport level within the `content` class. `class_weight='balanced'` handles ad/content imbalance but not sport-level imbalance within content. Watch for this in the confusion matrix if accuracy degrades.
+
+---
+
+## v1.1: Python 3.13 + Dependency Upgrade (2026-03-29)
+
+### Homebrew migration: x86_64 → arm64
+
+The machine is Apple Silicon (M5 Pro) but had only the x86_64 Homebrew (`/usr/local`) carried over from a prior Intel laptop. All Python builds were x86_64 running under Rosetta, which meant PyTorch couldn't find `macosx_arm64` wheels. Installed native arm64 Homebrew at `/opt/homebrew` and added it to PATH ahead of `/usr/local`. The old x86_64 Homebrew remains in `/usr/local` — inert but harmless.
+
+### Python 3.12 → 3.13
+
+No code changes required. All six scripts (`capture.py`, `label.py`, `label_store.py`, `train.py`, `monitor.py`, `plot_roc.py`) work unmodified.
+
+### Dependency version changes
+
+| Package | Before | After |
+|---------|--------|-------|
+| Python | 3.12.12 (x86_64) | 3.13.12 (arm64) |
+| torch | 2.2.2 | 2.11.0 |
+| torchvision | 0.17.2 | 0.26.0 |
+| numpy | 1.26.4 | 2.4.4 |
+| scikit-learn | 1.8.0 | 1.8.0 |
+| Pillow | 12.1.1 | 12.1.1 |
+| matplotlib | (installed but unlisted) | 3.10.8 |
+
+### requirements.txt changes
+
+- `torch>=2.0,<2.5` → `torch>=2.5` (upper bound removed; Apple Silicon has wheels for all recent versions)
+- `torchvision>=0.15,<0.20` → `torchvision>=0.20`
+- `numpy>=1.24,<2` → `numpy>=2.0` (torch 2.5+ supports numpy 2.x)
+- Added `matplotlib>=3.8` (was missing; used by `plot_roc.py`)
+
+### Model and feature cache compatibility
+
+The existing `models/classifier.joblib` (trained under numpy 1.26.4) loaded successfully under numpy 2.4.4. The feature cache (`feature_cache/`) also loaded without issues. Retraining produced comparable CV metrics (AUC 0.986 vs. prior 0.993 — within normal fold variance).
 
 ---
 

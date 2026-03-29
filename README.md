@@ -22,12 +22,12 @@ Hard-to-classify frames from Phase 2 are saved automatically for relabeling. Aft
 
 ## Requirements
 
-- macOS (uses `screencapture` and `osascript`)
-- Python 3.12 via Homebrew with tkinter: `brew install python@3.12 python-tk@3.12`
+- macOS on Apple Silicon (uses `screencapture` and `osascript`)
+- Python 3.13 via Homebrew with tkinter: `brew install python@3.13 python-tk@3.13`
 - `uv` for environment management
 
 ```bash
-uv venv --python python3.12 .venv
+uv venv --python python3.13 .venv
 uv pip install -r requirements.txt
 ```
 

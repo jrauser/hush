@@ -1,8 +1,9 @@
 Pillow>=10.0
-torch>=2.0,<2.5      # 2.5+ dropped macOS x86_64 wheels
-torchvision>=0.15,<0.20
+torch>=2.5
+torchvision>=0.20
 scikit-learn>=1.3
 joblib>=1.3
-numpy>=1.24,<2       # torch <2.5 requires numpy 1.x
+numpy>=2.0
 tqdm>=4.0
 flask>=3.0
+matplotlib>=3.8
