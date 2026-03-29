@@ -67,8 +67,10 @@ def build_extractor(name, device):
 
 # ── feature cache ─────────────────────────────────────────────────────────────
 
+CACHE_DIR = 'feature_cache'
+
 def _cache_stem(extractor_name, n):
-    return f'feature_cache_{extractor_name}_{n}'
+    return os.path.join(CACHE_DIR, f'{extractor_name}_{n}')
 
 def load_cache(extractor_name, n, paths):
     stem = _cache_stem(extractor_name, n)
@@ -82,6 +84,7 @@ def load_cache(extractor_name, n, paths):
     return np.load(fx), np.load(fy)
 
 def save_cache(extractor_name, n, paths, X, y):
+    os.makedirs(CACHE_DIR, exist_ok=True)
     stem = _cache_stem(extractor_name, n)
     np.save(stem + '_X.npy', X)
     np.save(stem + '_y.npy', y)

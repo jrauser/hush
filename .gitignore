@@ -11,8 +11,7 @@ hard_frames/
 
 # Generated artifacts
 models/
-feature_cache_*.npy
-feature_cache_*.json
+feature_cache/
 roc.png
 
 # macOS
