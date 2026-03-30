@@ -9,9 +9,11 @@ The current `screencapture` approach grabs whatever is on screen, so it captures
 **Approach:** A small Chrome extension using the `chrome.tabCapture` API.
 
 - The extension captures video (and optionally audio) from the stream's tab regardless of foreground state
-- Periodically sends frames to a local endpoint (WebSocket or HTTP POST to the monitor)
+- Periodically sends frames to a local endpoint (HTTP POST to the monitor)
+- Monitor responds to each POST with config (including capture interval), so the monitor drives timing without the extension needing independent settings. Extension defaults to a sensible interval (e.g. 5s) if it can't reach the monitor.
 - Monitor feeds those frames into the existing ResNet classifier — no new model needed
 - Audio-based features (volume spikes, crowd noise) could be a useful second signal but aren't required for the initial version
+- User activates capture by clicking the extension's toolbar icon while on the streaming tab. This triggers `chrome.tabCapture.capture()` (which requires a user gesture). Clicking again stops the stream. Icon reflects active/inactive state. Capture is tied to the tab — survives tab switches but ends if the tab is closed.
 - Extension itself would be ~50 lines of JS
 
 ## Package for distribution via PyPI + uv
