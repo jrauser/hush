@@ -289,3 +289,118 @@ Comparable to prior run (AUC 0.983 vs. 0.986) — within normal fold variance. T
 - **Pros:** Crowd noise is a strong signal; no GPU needed; works with screen covered.
 - **Cons:** Some ads use stadium sounds; halftime/bios have music similar to ads; macOS audio capture requires a virtual driver (BlackHole/Loopback) — significant setup friction.
 - **Conclusion:** Video classification is the right primary approach. Audio as a secondary confirmation signal is worth revisiting after the video classifier is validated in real use.
+
+---
+
+## v2.0: Chrome Extension + PyQt6 Desktop App (2026-03-30)
+
+### Architecture
+
+v2 replaces the v1 collection of scripts with two components:
+
+1. **Chrome extension** — uses `chrome.tabCapture.getMediaStreamId()` + an offscreen document to grab frames from a single browser tab in the background. Posts JPEG frames to the desktop app over HTTP, receives mute/unmute commands over WebSocket. Works while the user is in other tabs or apps.
+2. **PyQt6 desktop app** — unified Live Monitor view. Runs a FastAPI+uvicorn server on `localhost:9099` (single port for both HTTP frame upload at `/frame` and WebSocket control plane at `/ws`). Classifies frames, drives the MuteFSM, and sends mute/unmute commands back to the extension.
+
+This replaces v1's `screencapture` + `osascript` approach. Audio control is now Chrome-only (tab-level muting via `chrome.tabs.update`), eliminating the system-wide mute that affected all apps.
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `extension/manifest.json` | Chrome Manifest V3 extension config |
+| `extension/background.js` | Service worker: WebSocket, offscreen lifecycle, tab mute, backoff |
+| `extension/offscreen.html/js` | Offscreen document: getUserMedia, frame capture loop, POST to server |
+| `extension/popup.html/js` | Extension popup: status display, Enable/Disable, unmute override |
+| `extension/icons/` | Green (connected) and grey (disconnected) icons |
+| `src/hush/server.py` | FastAPI server: `/frame` endpoint, `/ws` WebSocket, signal bridge |
+| `src/hush/frame_pipeline.py` | Classify frames, drive FSM, manage temp files |
+| `src/hush/v2app.py` | PyQt6 desktop app with Live Monitor view |
+| `tests/test_server.py` | FastAPI endpoint tests (11 tests) |
+| `tests/test_resilience.py` | Backoff, disconnection, concurrent ops (12 tests) |
+| `tests/test_frame_pipeline.py` | Pipeline with fake classifier (11 tests) |
+| `tests/test_model_loading.py` | Model validation (5 tests) |
+
+### MuteFSM: user-muted override
+
+The FSM gained a `user_muted` parameter to handle the case where the user manually mutes the tab (via Chrome's speaker icon or the extension popup). Two override modes now exist:
+
+- **`override_unmuted`** (existing): user manually unmuted while we had it muted. Hands off until a clean content run clears the override.
+- **`override_muted`** (new): user manually muted while we had it unmuted. Hands off — no unmuting even if the classifier sees content. Clears only when the user manually unmutes (not on a content run), because the user's intent is silence.
+
+The `_override_is_muted` flag tracks which type of override is active. 19 FSM tests now (was 15).
+
+### Dependency changes
+
+| Package | v1.1 | v2.0 | Notes |
+|---------|------|------|-------|
+| flask | `>=3.0` | removed | Replaced by FastAPI |
+| fastapi | -- | `>=0.110` | HTTP + WebSocket on one port |
+| uvicorn[standard] | -- | `>=0.27` | ASGI server for FastAPI (standard extra includes websockets) |
+| python-multipart | -- | `>=0.0.6` | Required by FastAPI for file uploads |
+| PyQt6 | -- | `>=6.6` | Desktop app GUI |
+
+### Design decisions
+
+**FastAPI over Flask.** Flask has no native WebSocket support — we'd have needed a separate `websockets` server on a second port. FastAPI (via Starlette) serves HTTP and WebSocket on one port, one thread, one event loop. The extension connects to a single `localhost:9099` and doesn't need to manage two endpoints.
+
+**Signal bridge pattern.** The FastAPI server runs in a daemon thread with its own asyncio event loop. GUI updates must happen on the main (Qt) thread. A `SignalBridge` QObject emits Qt signals from the server callbacks, which Qt marshals to the main thread via its event loop. This avoids any direct cross-thread GUI access.
+
+**Frame pipeline as a separate module.** The classify → FSM → action chain was extracted from the app into `frame_pipeline.py` so it can be tested with a fake classifier (no real model, no GPU). The pipeline receives raw bytes, writes to a temp file, classifies, and returns a `FrameResult` with the FSM action. The app acts on whatever the pipeline says.
+
+**`tabCapture` over `captureVisibleTab`.** The extension must capture frames even when the user is in another tab or app. `tabCapture` provides a persistent MediaStream from the monitored tab. The tradeoff is Chrome shows a "sharing" indicator, but this is unavoidable for background capture.
+
+**Extension backoff.** Exponential backoff on WebSocket reconnection: 1s → 2s → 4s → ... → 30s (cap). Resets to 1s on successful connection. Frame POST failures are drop-and-continue (no queuing) — the next capture proceeds on schedule. On disconnect, the extension stops capturing and unmutes the tab.
+
+### Manifest V3: offscreen document for tabCapture
+
+The initial implementation called `chrome.tabCapture.capture()` directly from the service worker. This silently fails in MV3 — the service worker lacks DOM/media APIs and `capture()` requires a user gesture context that doesn't propagate through message passing.
+
+**Solution: three-part architecture.**
+1. **Popup** calls `chrome.tabCapture.getMediaStreamId({targetTabId})` on the Enable button click (has user gesture context). Passes the stream ID to the service worker.
+2. **Service worker** creates an offscreen document via `chrome.offscreen.createDocument()` with reason `USER_MEDIA`, sends it the stream ID.
+3. **Offscreen document** calls `navigator.mediaDevices.getUserMedia()` with `chromeMediaSource: 'tab'` and the stream ID. Handles the frame capture loop (ImageCapture → OffscreenCanvas → JPEG blob) and POSTs directly to the server.
+
+The service worker stays focused on WebSocket management, tab mute/unmute, and offscreen document lifecycle. The manifest already had the `offscreen` permission; `host_permissions` for `http://localhost:9099/*` was added for the fetch/WebSocket calls.
+
+**Override detection** was also improved: replaced the polling approach (`checkMuteOverride()` before each frame POST) with `chrome.tabs.onUpdated` listener filtered by `reason === "user"`. This catches user-initiated mute toggles immediately and distinguishes them from our own programmatic muting (which has `reason === "extension"`).
+
+### Extension popup: Enable button and auto-refresh
+
+The initial popup was read-only status display. The user had no way to initiate a connection — the service worker auto-connected on load, but MV3 service workers are terminated after inactivity, so the connection attempt might never happen.
+
+**Enable/Disable button** in the popup is now the primary control. "Enable on this tab" identifies the current tab, obtains the capture stream ID, and tells the service worker to connect. "Disable" tears everything down. Auto-connect on service worker startup was removed.
+
+**Auto-refresh** via `setInterval(refreshState, 1000)` so the popup reflects state changes (connecting → connected, idle → capturing) without reopening.
+
+### Uvicorn WebSocket support
+
+`uvicorn` without extras does not include a WebSocket library. The initial `pyproject.toml` listed `uvicorn>=0.27`, which installed the minimal package. WebSocket upgrade requests returned 404 with "No supported WebSocket library detected." Fixed by changing the dependency to `uvicorn[standard]>=0.27`, which pulls in `websockets`.
+
+### Graceful shutdown
+
+Qt's event loop swallows SIGINT, so Ctrl+C had no effect. Fixed with `signal.signal(signal.SIGINT, lambda *_: app.quit())` plus a 200ms QTimer that fires a no-op callback — this forces periodic returns from Qt's C++ event loop to Python so the signal handler can run.
+
+Uvicorn shutdown was also broken: `loop.call_soon_threadsafe(loop.stop)` yanked the event loop out from under uvicorn, causing `RuntimeError: Event loop stopped before Future completed`. Fixed by setting `server.should_exit = True` instead, which lets uvicorn finish its shutdown sequence cleanly.
+
+### Monitor grid: fill-right-to-left with animated slide-down
+
+The initial grid rendered newest-first at top-left, pushing all existing thumbnails right and wrapping. Every frame arrival caused every thumbnail to shift sideways — disorienting and hard to track.
+
+**New layout:** Frames are always in chronological order left-to-right, top-to-bottom. The top row fills right-to-left: empty cells get dashed-border placeholders, and each new frame replaces the rightmost placeholder. Nothing moves sideways. A new placeholder row is created only when the first frame that needs it arrives (not when the last cell fills), so the frame always lands where the user expects.
+
+When a new row IS created, all frame widgets animate downward (300ms ease-out-cubic via `QPropertyAnimation` on the `pos` property). This required switching from `QGridLayout` to manual positioning inside a `QScrollArea` — layouts fight with position animation, but manual `widget.move()` gives full control.
+
+### Test coverage
+
+81 tests total (was 36). New test files cover:
+- Server endpoints: frame upload, WebSocket connect/disconnect, heartbeats, overrides, malformed input
+- Resilience: callback exceptions don't crash the server, rapid POSTs, concurrent frame+WebSocket, disconnection cleanup
+- Backoff schedule: doubling, cap at 30s, reset on success
+- Frame pipeline: classification, uncertainty detection, temp file lifecycle, relabeling persistence
+- Model loading: valid/missing/corrupt/incomplete model bundles
+
+### What's deferred to v2.1
+
+- Capture & Label view (v1 `label.py` still works)
+- In-app training with diagnostics
+- Model browser with ROC curves

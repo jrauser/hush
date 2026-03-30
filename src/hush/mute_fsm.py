@@ -1,6 +1,6 @@
 """Streak-based mute state machine.
 
-Pure logic — no I/O, no tkinter, no subprocess. Call update() with each
+Pure logic — no I/O, no GUI, no subprocess. Call update() with each
 new predicted label. The FSM returns what to do ('mute', 'unmute', or None);
 the caller decides how to act on it.
 """
@@ -15,14 +15,18 @@ class MuteFSM:
         self.ad_streak = 0
         self.ok_streak = 0
         self._paused = False
+        # Tracks whether the override was caused by a manual mute (persistent)
+        # vs a manual unmute (clears after content run).
+        self._override_is_muted = False
 
-    def update(self, pred_label: str, user_unmuted: bool = False) -> str | None:
+    def update(self, pred_label: str, user_unmuted: bool = False,
+               user_muted: bool = False) -> str | None:
         """Feed one frame's prediction.
 
         Args:
             pred_label: 'ad', 'content', or 'neither'.
-            user_unmuted: True if the system was muted by us but the user
-                has since manually unmuted (override detection).
+            user_unmuted: True if we had it muted but the user manually unmuted.
+            user_muted: True if we had it unmuted but the user manually muted.
 
         Returns:
             'mute', 'unmute', or None.
@@ -33,15 +37,29 @@ class MuteFSM:
         # User override detection: they manually unmuted while we had it muted
         if self.muted and user_unmuted:
             self.override = True
+            self._override_is_muted = False
             self.muted = False
             self.ad_streak = 0
             return None
 
-        # While in override, wait for a clean content run before re-engaging
-        if self.override:
+        # User override detection: they manually muted while we had it unmuted
+        if not self.muted and user_muted:
+            self.override = True
+            self._override_is_muted = True
+            self.muted = True
+            self.ok_streak = 0
+            return None
+
+        # While in override from manual unmute, wait for a content run to re-engage
+        if self.override and not self._override_is_muted:
             self._update_streaks(pred_label)
             if self.ok_streak >= self.unmute_delay:
                 self.override = False
+            return None
+
+        # While in override from manual mute, stay hands-off until user unmutes.
+        # Only a user_unmuted event (above) clears this — not a content run.
+        if self.override and self._override_is_muted:
             return None
 
         self._update_streaks(pred_label)

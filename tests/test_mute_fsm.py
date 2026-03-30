@@ -111,6 +111,50 @@ class TestUserOverride:
         assert fsm.update('ad') == 'mute'
 
 
+class TestUserMutedOverride:
+    def test_user_muted_enters_override(self):
+        fsm = MuteFSM(mute_delay=2, unmute_delay=2)
+        # FSM is unmuted, user manually mutes the tab
+        fsm.update('content', user_muted=True)
+        assert fsm.override is True
+        assert fsm.muted is True
+
+    def test_user_muted_prevents_unmute(self):
+        fsm = MuteFSM(mute_delay=2, unmute_delay=2)
+        fsm.update('content', user_muted=True)
+        # Content keeps playing, but we don't unmute — user wants silence
+        for _ in range(10):
+            assert fsm.update('content') is None
+        assert fsm.muted is True
+
+    def test_user_muted_clears_on_user_unmute(self):
+        fsm = MuteFSM(mute_delay=1, unmute_delay=2)
+        # User manually mutes
+        fsm.update('content', user_muted=True)
+        assert fsm.override is True
+        assert fsm.muted is True
+        # User later manually unmutes
+        fsm.update('content', user_unmuted=True)
+        assert fsm.override is True  # now in unmute-override, clears after content run
+        assert fsm.muted is False
+        # Content run clears the override
+        fsm.update('content')
+        fsm.update('content')
+        assert fsm.override is False
+        # Normal behavior resumes — ads can trigger mute again
+        assert fsm.update('ad') == 'mute'
+
+    def test_user_muted_ok_streak_reset(self):
+        fsm = MuteFSM(mute_delay=2, unmute_delay=2)
+        # Build up a content streak
+        fsm.update('content')
+        fsm.update('content')
+        assert fsm.ok_streak == 2
+        # User manually mutes — ok_streak should reset
+        fsm.update('content', user_muted=True)
+        assert fsm.ok_streak == 0
+
+
 class TestPause:
     def test_pause_suppresses_actions(self):
         fsm = MuteFSM(mute_delay=1)
