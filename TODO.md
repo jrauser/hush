@@ -14,33 +14,6 @@ The current `screencapture` approach grabs whatever is on screen, so it captures
 - Audio-based features (volume spikes, crowd noise) could be a useful second signal but aren't required for the initial version
 - Extension itself would be ~50 lines of JS
 
-## Store feature vectors in SQLite
-
-The current feature cache (`feature_cache/`) uses flat files keyed by extractor name + sample count. This is fragile — adding one label invalidates the entire cache and forces re-extraction of all images. Moving features into the database enables incremental extraction and eliminates cache file management.
-
-**Schema:** Add a `features` table with a composite primary key:
-
-```sql
-CREATE TABLE features (
-    screenshot_id  INTEGER NOT NULL REFERENCES screenshots(id),
-    extractor      TEXT NOT NULL,
-    vector         BLOB NOT NULL,
-    PRIMARY KEY (screenshot_id, extractor)
-);
-```
-
-**Changes to `train.py`:**
-- Query labeled screenshots that are missing a row in `features` for the current extractor
-- Extract only those, insert the vectors
-- Load all labeled features in one query, assemble numpy arrays, train
-- Remove `feature_cache/` directory, `_cache_stem`, `load_cache`, `save_cache`
-
-**Benefits:**
-- Incremental: labeling one new image extracts one new feature vector, not all 1000+
-- Multiple extractors coexist naturally (ResNet-50 and future DINOv2 side by side)
-- No stale cache files to clean up
-- ~8KB per row (2048 × float32), so ~8.5MB for 1000 images — trivial for SQLite
-
 ## Package for distribution via PyPI + uv
 
 Rename the project (hush conflicts with a common shell) and publish to PyPI so users can install with `uv tool install muteads` (or whatever name we pick).
@@ -72,6 +45,10 @@ muteads monitor --web-port 5150
 ## Mobile annotation via local web UI (v1.0)
 
 Implemented as a Flask server in `monitor.py` with `--web-port` flag.
+
+## Store feature vectors in SQLite (v1.1, 2026-03-29)
+
+Replaced flat-file feature cache (`feature_cache/`) with a `features` table in SQLite. Feature extraction is now incremental — labeling one new image extracts one vector, not all 1,177. Multiple extractors coexist naturally via composite PK `(screenshot_id, extractor)`.
 
 ## Upgrade to Python 3.13 + modern dependencies (v1.1, 2026-03-29)
 

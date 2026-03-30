@@ -134,7 +134,7 @@ Reload re-reads the database and filesystem. Any screenshot files deleted outsid
   --notes TEXT         Free-text note recorded with this training run
 ```
 
-Feature extraction results are cached in `feature_cache/`. Re-running `train.py` with the same labeled set skips extraction and goes straight to cross-validation.
+Feature vectors are cached per-screenshot in the SQLite database. Only new/unlabeled images need extraction — re-running `train.py` after labeling a few more frames extracts only those, then goes straight to cross-validation.
 
 Output includes a per-fold table (accuracy, F1, AUC) and a confusion matrix. ROC curve data is saved alongside the model as `models/classifier_roc.npz`.
 
@@ -198,7 +198,6 @@ hush/
 ├── models/
 │   ├── classifier.joblib
 │   └── classifier_roc.npz
-└── feature_cache/       Cached ResNet-50 features (safe to delete)
 ```
 
 ---

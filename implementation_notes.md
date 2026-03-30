@@ -14,7 +14,7 @@ Checkpoint document recording decisions made, problems encountered, and deviatio
 | `train.py` | Done |
 | `monitor.py` | Done |
 | `mute_fsm.py` | Done |
-| `tests/` | Done (29 tests) |
+| `tests/` | Done (36 tests) |
 
 All components implemented. Git repo initialized with initial commit `e28ffe4`.
 
@@ -250,6 +250,37 @@ The mute state machine was extracted from `MonitorApp` into a standalone class t
 This made the FSM fully testable with zero mocks — 15 tests covering all edge cases run in <1ms.
 
 One minor wart: `MonitorApp` accesses `self._fsm._paused` (a private attribute) to check pause state in the capture loop and header rendering. Adding a `@property` felt like ceremony for an internal collaborator, but if `MuteFSM` ever gets used elsewhere this should be cleaned up.
+
+---
+
+## Feature Vectors in SQLite (v1.1)
+
+Replaced the flat-file feature cache (`feature_cache/`) with a `features` table in the existing SQLite database. The old cache was keyed by `(extractor_name, sample_count)` with a full path-list comparison — adding or removing one label changed the count and invalidated the entire cache, forcing re-extraction of all images.
+
+### Schema
+
+```sql
+CREATE TABLE features (
+    screenshot_id  INTEGER NOT NULL REFERENCES screenshots(id),
+    extractor      TEXT NOT NULL,
+    vector         BLOB NOT NULL,
+    PRIMARY KEY (screenshot_id, extractor)
+);
+```
+
+### Design decisions
+
+**BLOB over `.npy` format.** Vectors are stored as raw bytes via `ndarray.tobytes()` / `np.frombuffer()`. No numpy version-specific headers, no file format to parse. 8,192 bytes per row (2048 × float32).
+
+**No automatic migration.** First run after the change extracted all 1,177 images from scratch (~25s on MPS) rather than parsing old cache files. The old cache was already fragile, so there was nothing worth preserving.
+
+**INSERT OR REPLACE for upserts.** If a feature vector is re-extracted (e.g. after switching extractor versions), the new vector silently replaces the old one via the composite primary key.
+
+**No FK enforcement.** SQLite doesn't enforce `REFERENCES` without `PRAGMA foreign_keys = ON`. Orphan feature rows from deleted screenshots waste negligible space and are invisible to queries (which always filter by requested IDs).
+
+### CV metrics after migration
+
+Comparable to prior run (AUC 0.983 vs. 0.986) — within normal fold variance. The feature vectors round-trip through BLOB serialization without loss.
 
 ---
 

@@ -1,7 +1,6 @@
 """train.py — Extract features, cross-validate, and train the hush ad classifier."""
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime
@@ -65,33 +64,6 @@ def build_extractor(name, device):
     raise ValueError(f'Unknown extractor: {name!r}')
 
 
-# ── feature cache ─────────────────────────────────────────────────────────────
-
-CACHE_DIR = 'feature_cache'
-
-def _cache_stem(extractor_name, n):
-    return os.path.join(CACHE_DIR, f'{extractor_name}_{n}')
-
-def load_cache(extractor_name, n, paths):
-    stem = _cache_stem(extractor_name, n)
-    fx, fy, fp = stem + '_X.npy', stem + '_y.npy', stem + '_paths.json'
-    if not (os.path.isfile(fx) and os.path.isfile(fy) and os.path.isfile(fp)):
-        return None, None
-    with open(fp) as f:
-        cached_paths = json.load(f)
-    if cached_paths != paths:
-        return None, None
-    return np.load(fx), np.load(fy)
-
-def save_cache(extractor_name, n, paths, X, y):
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    stem = _cache_stem(extractor_name, n)
-    np.save(stem + '_X.npy', X)
-    np.save(stem + '_y.npy', y)
-    with open(stem + '_paths.json', 'w') as f:
-        json.dump(paths, f)
-
-
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -133,24 +105,36 @@ def main():
             print('Label more frames or lower --n-folds.')
             sys.exit(1)
 
-    paths = [r['filename'] for r in rows]
-    y     = np.array([LABEL_MAP[r['label']] for r in rows])
+    y = np.array([LABEL_MAP[r['label']] for r in rows])
 
-    # ── 2. Feature extraction (with cache) ────────────────────────────────────
-    X, y_cached = load_cache(args.extractor, len(rows), paths)
-    if X is not None:
-        print(f'\nLoaded features from cache ({args.extractor}, {len(rows)} samples).')
-    else:
-        print(f'\nExtracting {args.extractor} features for {len(rows)} images...')
+    # ── 2. Feature extraction (incremental, DB-backed) ───────────────────────
+    all_ids = [r['id'] for r in rows]
+    cached = store.get_features(args.extractor, all_ids)
+    missing = [r for r in rows if r['id'] not in cached]
+
+    if missing:
+        print(f'\nExtracting {args.extractor} features for {len(missing)} images '
+              f'({len(cached)} already cached)...')
         if torch.backends.mps.is_available():
             device = torch.device('mps')
         else:
             device = torch.device('cpu')
         print(f'Device: {device}')
         extractor = build_extractor(args.extractor, device)
-        X = extractor(paths)
-        save_cache(args.extractor, len(rows), paths, X, y)
-        print(f'Feature matrix: {X.shape}')
+        missing_paths = [r['filename'] for r in missing]
+        new_vectors = extractor(missing_paths)
+        store.save_features_bulk(
+            args.extractor,
+            [(r['id'], new_vectors[i]) for i, r in enumerate(missing)],
+        )
+        for i, r in enumerate(missing):
+            cached[r['id']] = new_vectors[i]
+    else:
+        print(f'\nAll {len(cached)} features loaded from DB ({args.extractor}).')
+
+    # Assemble X in the same order as rows/y
+    X = np.vstack([cached[r['id']] for r in rows])
+    print(f'Feature matrix: {X.shape}')
 
     # ── 3. Classifier ─────────────────────────────────────────────────────────
     if args.classifier == 'rf':

@@ -1,6 +1,7 @@
 import json
 import sqlite3
 
+import numpy as np
 import pytest
 
 
@@ -93,6 +94,13 @@ class TestDelete:
         store.delete_screenshots(["img/zzz.jpg"])
         assert len(store.get_all()) == 1
 
+    def test_delete_cascades_to_features(self, store):
+        sid = store.add_screenshot("img/a.jpg", "2026-01-01T00:00:00")
+        vec = np.ones(2048, dtype=np.float32)
+        store.save_feature(sid, "resnet50", vec)
+        store.delete_screenshots(["img/a.jpg"])
+        assert store.get_features("resnet50", [sid]) == {}
+
 
 class TestTrainingRun:
     def test_record_and_query(self, store):
@@ -138,3 +146,64 @@ class TestTrainingRun:
         )
         row = dict(store.conn.execute("SELECT * FROM training_runs").fetchone())
         assert row["confusion_matrix"] == cm_str
+
+
+class TestFeatures:
+    def _add_screenshot(self, store, name="img/a.jpg"):
+        return store.add_screenshot(name, "2026-01-01T00:00:00")
+
+    def test_save_and_get_feature(self, store):
+        sid = self._add_screenshot(store)
+        vec = np.random.rand(2048).astype(np.float32)
+        store.save_feature(sid, "resnet50", vec)
+        result = store.get_features("resnet50", [sid])
+        assert sid in result
+        np.testing.assert_array_equal(result[sid], vec)
+
+    def test_get_features_returns_only_existing(self, store):
+        sid1 = self._add_screenshot(store, "img/a.jpg")
+        sid2 = self._add_screenshot(store, "img/b.jpg")
+        sid3 = self._add_screenshot(store, "img/c.jpg")
+        vec = np.ones(2048, dtype=np.float32)
+        store.save_feature(sid1, "resnet50", vec)
+        store.save_feature(sid3, "resnet50", vec)
+        result = store.get_features("resnet50", [sid1, sid2, sid3])
+        assert set(result.keys()) == {sid1, sid3}
+
+    def test_save_features_bulk(self, store):
+        sids = [self._add_screenshot(store, f"img/{i}.jpg") for i in range(5)]
+        pairs = [(sid, np.full(2048, sid, dtype=np.float32)) for sid in sids]
+        store.save_features_bulk("resnet50", pairs)
+        result = store.get_features("resnet50", sids)
+        assert len(result) == 5
+        for sid in sids:
+            np.testing.assert_array_equal(result[sid], np.full(2048, sid, dtype=np.float32))
+
+    def test_upsert_replaces_vector(self, store):
+        sid = self._add_screenshot(store)
+        vec1 = np.zeros(2048, dtype=np.float32)
+        vec2 = np.ones(2048, dtype=np.float32)
+        store.save_feature(sid, "resnet50", vec1)
+        store.save_feature(sid, "resnet50", vec2)
+        result = store.get_features("resnet50", [sid])
+        np.testing.assert_array_equal(result[sid], vec2)
+
+    def test_multiple_extractors_coexist(self, store):
+        sid = self._add_screenshot(store)
+        vec_r = np.ones(2048, dtype=np.float32)
+        vec_d = np.full(384, 2.0, dtype=np.float32)
+        store.save_feature(sid, "resnet50", vec_r)
+        store.save_feature(sid, "dinov2", vec_d)
+        r = store.get_features("resnet50", [sid])
+        d = store.get_features("dinov2", [sid])
+        np.testing.assert_array_equal(r[sid], vec_r)
+        np.testing.assert_array_equal(d[sid], vec_d)
+
+    def test_get_features_empty_ids(self, store):
+        assert store.get_features("resnet50", []) == {}
+
+    def test_features_table_exists(self, store):
+        tables = store.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='features'"
+        ).fetchall()
+        assert len(tables) == 1

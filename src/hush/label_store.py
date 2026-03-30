@@ -2,6 +2,8 @@ import json
 import sqlite3
 from datetime import datetime
 
+import numpy as np
+
 
 class LabelStore:
     def __init__(self, db_path):
@@ -36,6 +38,12 @@ class LabelStore:
                     classifier_type   TEXT NOT NULL,
                     feature_extractor TEXT NOT NULL,
                     notes             TEXT
+                );
+                CREATE TABLE IF NOT EXISTS features (
+                    screenshot_id  INTEGER NOT NULL REFERENCES screenshots(id),
+                    extractor      TEXT NOT NULL,
+                    vector         BLOB NOT NULL,
+                    PRIMARY KEY (screenshot_id, extractor)
                 );
                 CREATE INDEX IF NOT EXISTS idx_screenshots_label
                     ON screenshots(label);
@@ -99,8 +107,15 @@ class LabelStore:
             )
 
     def delete_screenshots(self, filenames):
-        """Remove DB records for the given filenames. Does not touch the filesystem."""
+        """Remove DB records and associated features. Does not touch the filesystem."""
         with self.conn:
+            # Delete features for these screenshots before removing the screenshots
+            self.conn.execute(
+                "DELETE FROM features WHERE screenshot_id IN "
+                "(SELECT id FROM screenshots WHERE filename IN ({}))"
+                .format(','.join('?' * len(filenames))),
+                list(filenames),
+            )
             self.conn.executemany(
                 "DELETE FROM screenshots WHERE filename = ?",
                 [(f,) for f in filenames],
@@ -151,4 +166,42 @@ class LabelStore:
                     feature_extractor,
                     notes,
                 ),
+            )
+
+    # ── feature vectors ──────────────────────────────────────────────────────
+
+    def get_features(self, extractor, screenshot_ids):
+        """Return {screenshot_id: np.ndarray} for rows that exist."""
+        if not screenshot_ids:
+            return {}
+        placeholders = ','.join('?' * len(screenshot_ids))
+        rows = self.conn.execute(
+            f"SELECT screenshot_id, vector FROM features "
+            f"WHERE extractor = ? AND screenshot_id IN ({placeholders})",
+            [extractor] + list(screenshot_ids),
+        ).fetchall()
+        return {
+            row['screenshot_id']: np.frombuffer(row['vector'], dtype=np.float32)
+            for row in rows
+        }
+
+    def save_feature(self, screenshot_id, extractor, vector):
+        """Insert or replace a single feature vector."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO features (screenshot_id, extractor, vector) "
+                "VALUES (?, ?, ?)",
+                (screenshot_id, extractor, vector.astype(np.float32).tobytes()),
+            )
+
+    def save_features_bulk(self, extractor, id_vector_pairs):
+        """Insert or replace multiple feature vectors in one transaction."""
+        with self.conn:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO features (screenshot_id, extractor, vector) "
+                "VALUES (?, ?, ?)",
+                [
+                    (sid, extractor, vec.astype(np.float32).tobytes())
+                    for sid, vec in id_vector_pairs
+                ],
             )

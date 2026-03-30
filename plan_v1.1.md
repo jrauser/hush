@@ -372,3 +372,119 @@ Pure unit tests — no I/O, no mocks.
 4. **Write `tests/test_mute_fsm.py`.** Run, fix any issues found.
 5. **Delete `requirements.txt`.** Update README and implementation_notes.
 6. **Update `.gitignore`** if needed (e.g. `*.egg-info/`).
+
+---
+
+## Part 3: Store Feature Vectors in SQLite
+
+### Goal
+
+Replace the flat-file feature cache (`feature_cache/`) with a `features` table in the existing SQLite database. The current cache is keyed by `(extractor_name, sample_count)` — adding or removing even one label invalidates the entire cache and forces re-extraction of all images. Storing features per-screenshot enables incremental extraction: label one new image, extract one new vector, train.
+
+---
+
+### Schema
+
+Add a `features` table to `LabelStore._create_tables()`:
+
+```sql
+CREATE TABLE IF NOT EXISTS features (
+    screenshot_id  INTEGER NOT NULL REFERENCES screenshots(id),
+    extractor      TEXT NOT NULL,
+    vector         BLOB NOT NULL,
+    PRIMARY KEY (screenshot_id, extractor)
+);
+```
+
+Each row stores one feature vector for one screenshot under one extractor. The composite primary key means a screenshot can have vectors for multiple extractors (ResNet-50 today, DINOv2 someday) without conflict. Vectors are stored as raw bytes (`numpy.ndarray.tobytes()`) and reconstructed with `np.frombuffer()`. At 2048 × float32 = 8,192 bytes per row, 1,200 images costs ~10 MB — trivial for SQLite.
+
+---
+
+### New `LabelStore` Methods
+
+```python
+def get_features(self, extractor, screenshot_ids):
+    """Return {screenshot_id: np.ndarray} for rows that exist."""
+
+def save_feature(self, screenshot_id, extractor, vector):
+    """Insert or replace a single feature vector (as BLOB)."""
+
+def save_features_bulk(self, extractor, id_vector_pairs):
+    """Insert or replace multiple feature vectors in one transaction."""
+```
+
+`get_features` returns only the rows that exist — the caller diffs against the full set of labeled screenshot IDs to determine which need extraction.
+
+`save_features_bulk` wraps the inserts in a single transaction for efficiency (1,000+ rows during initial migration from the old cache).
+
+---
+
+### Changes to `train.py`
+
+The entire feature cache section (lines 68–92: `CACHE_DIR`, `_cache_stem`, `load_cache`, `save_cache`) is deleted. The feature extraction section (lines 139–153) is replaced with:
+
+1. **Load existing features.** Query `store.get_features(extractor, [r['id'] for r in rows])`. This returns a dict of `{screenshot_id: vector}` for all labeled screenshots that already have a cached vector.
+
+2. **Find the gap.** Diff: `missing = [r for r in rows if r['id'] not in cached]`.
+
+3. **Extract only missing.** If `missing` is non-empty, build the extractor, run it on just those paths, and call `store.save_features_bulk(extractor, [(r['id'], vec) for ...])`.
+
+4. **Assemble arrays.** Build `X` and `y` numpy arrays from the full set (cached + newly extracted), preserving row order to match the label vector.
+
+The `--extractor` flag and `build_extractor()` function are unchanged.
+
+---
+
+### Migration Path
+
+There is no automatic migration from flat files to SQLite. On the first run after this change:
+
+- `train.py` finds no rows in the `features` table, extracts all ~1,200 images, and inserts the vectors. This takes 2–3 minutes on MPS — a one-time cost.
+- The `feature_cache/` directory is deleted from the repo and added to `.gitignore`.
+
+This is simpler and safer than writing migration code that parses the old cache files. The old cache was already fragile (any dataset change invalidated it), so there's nothing worth preserving.
+
+---
+
+### Test Plan
+
+#### New tests in `test_label_store.py`
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_save_and_get_feature` | Save one vector, retrieve it, verify shape and values round-trip through BLOB serialization |
+| `test_get_features_returns_only_existing` | Request features for 3 IDs, only 2 have rows → returns dict with 2 entries |
+| `test_save_features_bulk` | Bulk-insert N vectors, retrieve all N, verify each matches |
+| `test_feature_upsert` | Save a vector, save a different vector for the same (id, extractor) → second vector wins |
+| `test_multiple_extractors` | Same screenshot_id with two different extractor names → both coexist, each returns correct vector |
+| `test_features_table_created` | Fresh `:memory:` LabelStore has a `features` table (schema migration works) |
+
+#### New tests in `test_train.py` (or integration-style tests)
+
+Not planned. The training logic is a thin orchestration layer over `LabelStore` + `build_extractor` + scikit-learn, all of which are tested or well-established. The risk is in the BLOB serialization round-trip, which is covered by the `test_label_store.py` tests above.
+
+---
+
+### Implementation Order
+
+1. **Add `features` table and new methods to `label_store.py`.** Write tests. Run them.
+2. **Rewrite feature extraction in `train.py`.** Remove `CACHE_DIR`, `_cache_stem`, `load_cache`, `save_cache`. Replace with incremental DB-backed extraction.
+3. **Delete `feature_cache/` directory.** Add `feature_cache/` to `.gitignore`.
+4. **Run full training** (`python -m hush.train --db hush.db`) to verify end-to-end. Compare CV metrics to prior run.
+5. **Update documentation.** `implementation_notes.md`, `TODO.md`, `README.md` if applicable.
+
+---
+
+### Risks
+
+**BLOB serialization across numpy versions.** `ndarray.tobytes()` is raw IEEE 754 floats — no numpy-version-specific header like `.npy` files have. This is intentionally simpler and more portable than the old `.npy` cache.
+
+**Large transaction on first run.** Inserting ~1,200 rows × 8 KB each in a single transaction is ~10 MB. SQLite handles this without issue.
+
+**No foreign key enforcement by default.** SQLite doesn't enforce `REFERENCES` unless `PRAGMA foreign_keys = ON` is set. We don't set it (and didn't before), so a deleted screenshot could leave orphan feature rows. This is harmless — `get_features` only returns rows for requested IDs, and orphan rows waste negligible space. If it bothers us later, a periodic `DELETE FROM features WHERE screenshot_id NOT IN (SELECT id FROM screenshots)` is trivial.
+
+---
+
+### Outcome (2026-03-29)
+
+Completed successfully. No deviations from the plan. Initial extraction of 1,177 images took ~25s on MPS (faster than the estimated 2–3 minutes). CV metrics after migration: AUC 0.983 vs. prior 0.986 — within normal fold variance. 7 new tests added (36 total). `feature_cache/` was already gitignored and untracked — no cleanup needed.
