@@ -305,6 +305,7 @@ class HushApp(QMainWindow):
         self._bulk_page: int = 0
         self._bulk_capturing: bool = False
         self._bulk_session_count: int = 0
+        self._bulk_capture_items: list[FrameResult] = []  # session-local list for stable grid
         self._undo_stack: list[tuple[list[str], dict[str, Optional[str]]]] = []
 
         # ── Grid rendering state ─────────────────────────────────────────
@@ -356,16 +357,27 @@ class HushApp(QMainWindow):
         self._info_label.setStyleSheet("color: #95a5a6;")
         header_layout.addWidget(self._info_label, stretch=1)
 
-        # Mode toggle
-        self._mode_btn = QPushButton("Bulk Capture")
-        self._mode_btn.setFont(QFont("Helvetica", 11))
-        self._mode_btn.setStyleSheet(
-            "QPushButton { background: #2980b9; color: white; "
-            "border: none; border-radius: 6px; padding: 6px 14px; }"
-            "QPushButton:hover { background: #3498db; }"
-        )
-        self._mode_btn.clicked.connect(self._toggle_mode)
-        header_layout.addWidget(self._mode_btn)
+        # Mode button bar — both always visible, active one highlighted
+        mode_bar = QWidget()
+        mode_bar.setStyleSheet("background: transparent;")
+        mode_bar_layout = QHBoxLayout(mode_bar)
+        mode_bar_layout.setContentsMargins(0, 0, 0, 0)
+        mode_bar_layout.setSpacing(0)
+
+        self._live_btn = QPushButton("Live Monitoring")
+        self._live_btn.setFont(QFont("Helvetica", 11))
+        self._live_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._live_btn.clicked.connect(self._switch_to_live)
+        mode_bar_layout.addWidget(self._live_btn)
+
+        self._bulk_btn = QPushButton("Bulk Capture")
+        self._bulk_btn.setFont(QFont("Helvetica", 11))
+        self._bulk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bulk_btn.clicked.connect(self._switch_to_bulk)
+        mode_bar_layout.addWidget(self._bulk_btn)
+
+        header_layout.addWidget(mode_bar)
+        self._update_mode_buttons()
 
         # Pause / Start-Stop button
         self._action_btn = QPushButton("\u23f8  Pause")
@@ -494,6 +506,29 @@ class HushApp(QMainWindow):
                 "\u2190/\u2192 = page   Ctrl+Z = undo"
             )
 
+    def _update_mode_buttons(self):
+        active_style = (
+            "QPushButton { background: #2980b9; color: white; "
+            "border: none; border-radius: 6px 0 0 6px; padding: 6px 14px; }"
+            "QPushButton:hover { background: #3498db; }"
+        )
+        inactive_style = (
+            "QPushButton { background: #2c3e50; color: #95a5a6; "
+            "border: none; border-radius: 0 6px 6px 0; padding: 6px 14px; }"
+            "QPushButton:hover { background: #34495e; color: white; }"
+        )
+        # Swap border-radius depending on which is active
+        if self._mode == MODE_LIVE:
+            self._live_btn.setStyleSheet(active_style)
+            self._bulk_btn.setStyleSheet(inactive_style)
+        else:
+            self._live_btn.setStyleSheet(
+                inactive_style.replace("0 6px 6px 0", "6px 0 0 6px")
+            )
+            self._bulk_btn.setStyleSheet(
+                active_style.replace("6px 0 0 6px", "0 6px 6px 0")
+            )
+
     # ── Key bindings ──────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event):
@@ -532,22 +567,19 @@ class HushApp(QMainWindow):
 
     # ── Mode switching ────────────────────────────────────────────────────────
 
-    def _toggle_mode(self):
-        if self._mode == MODE_LIVE:
-            self._switch_to_bulk()
-        else:
-            self._switch_to_live()
-
     def _switch_to_bulk(self):
+        if self._mode == MODE_BULK:
+            return
         # Stop bulk capture if somehow running (shouldn't be, but defensive)
         self._bulk_capturing = False
+        self._bulk_capture_items.clear()
 
         # Tear down live state
         self._teardown_live()
 
         self._mode = MODE_BULK
         self._sel.clear()
-        self._mode_btn.setText("Live Monitoring")
+        self._update_mode_buttons()
         self._bulk_controls.setVisible(True)
         self._update_legend()
 
@@ -557,9 +589,12 @@ class HushApp(QMainWindow):
 
         self._reload_bulk_data()
         self._render_grid()
+        QTimer.singleShot(0, self._render_grid)
         self._update_status()
 
     def _switch_to_live(self):
+        if self._mode == MODE_LIVE:
+            return
         # Stop bulk capture if running
         if self._bulk_capturing:
             self._bulk_capturing = False
@@ -567,7 +602,7 @@ class HushApp(QMainWindow):
         self._mode = MODE_LIVE
         self._sel.clear()
         self._prev_n_placeholders = -1
-        self._mode_btn.setText("Bulk Capture")
+        self._update_mode_buttons()
         self._bulk_controls.setVisible(False)
         self._update_legend()
 
@@ -582,6 +617,9 @@ class HushApp(QMainWindow):
             self._server.set_mode("active", interval_sec=self.args.interval)
 
         self._render_grid()
+        # Deferred re-render: the scroll area may not have its final size yet
+        # after the bulk controls bar is hidden, so re-render once layout settles.
+        QTimer.singleShot(0, self._render_grid)
         self._update_status()
 
     def _teardown_live(self):
@@ -649,13 +687,18 @@ class HushApp(QMainWindow):
         if self._bulk_capturing:
             self._bulk_capturing = False
             self._server.set_mode("idle")
+            # Transition to browse grid backed by full DB
+            self._reload_bulk_data()
         else:
             if not self._server.extension.connected:
                 logger.warning("Cannot start capture: extension not connected")
                 return
             self._bulk_capturing = True
+            self._bulk_capture_items.clear()
+            self._prev_n_placeholders = -1
             interval = self._interval_spin.value()
             self._server.set_mode("active", interval_sec=float(interval))
+        self._render_grid()
         self._update_status()
 
     def _on_interval_changed(self, value: int):
@@ -725,8 +768,22 @@ class HushApp(QMainWindow):
         self._store.add_screenshot(path, timestamp, source="extension")
         self._bulk_session_count += 1
 
-        # Refresh data and re-render, preserving any active selection
-        self._reload_bulk_data(clear_selection=False)
+        # Append to session-local list (not a full DB reload) so existing
+        # thumbnails don't shift. The capturing grid renders from this list.
+        self._bulk_capture_items.append(FrameResult(
+            path=path,
+            captured_at=timestamp,
+            pred_label=None,
+            prob_ad=None,
+            probs=None,
+            uncertain=False,
+            fsm_action=None,
+            relabeled=False,
+            user_label=None,
+        ))
+
+        self._render_grid()
+        self._update_status()
 
     def _on_override(self, muted: bool):
         if muted:
@@ -776,7 +833,7 @@ class HushApp(QMainWindow):
         if search:
             rows = [r for r in rows if search in r["filename"]]
 
-        self._bulk_filtered_rows = rows
+        self._bulk_filtered_rows = list(reversed(rows))  # newest first
         # Clamp page
         max_page = max(0, self._bulk_total_pages() - 1)
         self._bulk_page = min(self._bulk_page, max_page)
@@ -827,6 +884,8 @@ class HushApp(QMainWindow):
         """Return ordered list of paths for currently visible items."""
         if self._mode == MODE_LIVE:
             return [r.path for r in reversed(self._history)]
+        elif self._bulk_capturing:
+            return [r.path for r in reversed(self._bulk_capture_items)]
         else:
             return [r["filename"] for r in self._bulk_current_page_rows()]
 
@@ -834,6 +893,8 @@ class HushApp(QMainWindow):
         """Return ordered list of FrameResult for currently visible items."""
         if self._mode == MODE_LIVE:
             return list(reversed(self._history))
+        elif self._bulk_capturing:
+            return list(reversed(self._bulk_capture_items))
         else:
             return [self._row_to_result(r) for r in self._bulk_current_page_rows()]
 
@@ -872,7 +933,13 @@ class HushApp(QMainWindow):
             self._render_bulk_browse_grid()
 
     def _render_live_grid(self):
-        """Live mode: newest at top, fill right-to-left, slide-down animation."""
+        """Live mode: newest at top, fill right-to-left, slide-down animation.
+
+        The top row fills right-to-left: empty cells get dashed placeholders,
+        and each new frame replaces the rightmost placeholder. Nothing moves
+        sideways. A new placeholder row (with slide-down animation) is created
+        only when the previous row is completely full.
+        """
         grid_width = max(self._scroll_area.viewport().width(), 600)
         n_cols = max(1, (grid_width - GRID_MARGIN * 2) // CELL_W)
 
@@ -885,6 +952,10 @@ class HushApp(QMainWindow):
             total_cells = ((n - 1) // n_cols + 1) * n_cols
         n_placeholders = total_cells - n
 
+        # Slide-down triggers when the previous render had a completely full
+        # top row (0 placeholders) and this render created a new row of them.
+        # _prev_n_placeholders starts at -1 (sentinel) so the first render
+        # never triggers a slide.
         slide_down = (
             self._prev_n_placeholders == 0
             and n_placeholders > 0
@@ -933,13 +1004,20 @@ class HushApp(QMainWindow):
             self._grid_children.append(widget)
 
     def _render_bulk_capturing_grid(self):
-        """Bulk Capture while capturing: same fill-right-to-left as live mode."""
-        # Use the same mechanics as live grid for stable click targets
+        """Bulk Capture while capturing: same fill-right-to-left as live mode.
+
+        Uses _bulk_capture_items (session-local append-only list) instead of
+        the full DB so that existing thumbnails never shift when a new frame
+        arrives. Items are reversed for display (newest first, closest to
+        placeholders) — identical to live mode's reversed(self._history).
+        """
         grid_width = max(self._scroll_area.viewport().width(), 600)
         n_cols = max(1, (grid_width - GRID_MARGIN * 2) // CELL_W)
 
-        page_rows = self._bulk_current_page_rows()
-        items = [self._row_to_result(r) for r in page_rows]
+        # Reversed so newest is first (index 0), matching live mode.
+        # New frames append to _bulk_capture_items, so they appear at
+        # index 0 after reversal and fill the rightmost placeholder.
+        items = list(reversed(self._bulk_capture_items))
         n = len(items)
 
         if n == 0:
