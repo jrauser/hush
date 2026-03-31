@@ -404,3 +404,63 @@ When a new row IS created, all frame widgets animate downward (300ms ease-out-cu
 - Capture & Label view (v1 `label.py` still works)
 - In-app training with diagnostics
 - Model browser with ROC curves
+
+---
+
+## v2.1 Phase 1: Bulk Capture & Label View (2026-03-30)
+
+### Mode toggle and dual-view architecture
+
+The app now has two modes switched by a header button: **Live Monitoring** (existing) and **Bulk Capture** (new). The grid, controls, legend, and status bar all change per mode. Switching to Bulk Capture tears down live state (FSM, history, temp files) because the FSM's hysteresis position goes stale immediately. Switching back to Live starts fresh.
+
+Bulk Capture always starts in stopped/browsing mode — capture never auto-starts. If capture is running when the user switches to Live, it stops.
+
+### Unified selection via SelectionManager
+
+v2.0 had single-select only (click to toggle one frame). v2.1 extracts selection into `SelectionManager` (`src/hush/selection.py`), a pure-logic class with no GUI imports. Both modes share identical selection behavior:
+
+- Click toggles a single item
+- Shift+click selects a range from last-clicked
+- Cmd+A selects all visible items
+- Escape clears
+
+`FrameThumb` now emits `(index, shift_held)` instead of just a path, so `SelectionManager.click()` can compute ranges.
+
+### Bulk Capture grid: two sub-modes
+
+- **During capture:** Uses the same fill-right-to-left / slide-down-only mechanics as the live monitor grid. New frames fill placeholder cells without moving existing thumbnails — click targets stay stable.
+- **Capture stopped:** Standard left-to-right, top-to-bottom paginated layout. No placeholders or animation. Filter dropdown, search, arrow-key page navigation.
+
+### Selection preservation during capture
+
+Initial implementation cleared selection every time a new frame arrived (the data reload path called `_sel.clear()`). Fixed by threading a `clear_selection` parameter through `_reload_bulk_data` → `_apply_bulk_filter`. Frame arrivals pass `clear_selection=False`; user-initiated filter/search changes still clear.
+
+### Dropped `hard_frames/` directory
+
+All frames now save to `screenshots/`. The `source` column in the DB still tracks provenance (`'monitor'`, `'extension'`, `'capture'`). `FramePipeline` parameter renamed from `hard_frame_dir` to `screenshot_dir`. Existing `hard_frames/` files remain on disk — DB paths still resolve, training still works. A small migration script could consolidate them in the future if desired.
+
+### Zoom window in both modes
+
+New `ZoomWindow` (`QDialog`) provides full-size image viewing with arrow-key navigation and relabeling (A/C/N/X) or delete (D, Bulk mode only). Available in both Live and Bulk modes via double-click or Z key. v2.0 had no zoom.
+
+### FrameThumb reused for both modes
+
+Rather than a separate `BulkThumb` widget, `FrameThumb` handles both modes. For Bulk Capture, DB rows are converted to `FrameResult` objects with `pred_label` set to the user label (or `None` for unlabeled) and `prob_ad=None`. The caption and border color adapt: unlabeled frames get a neutral grey border and "unlabeled" caption.
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `src/hush/selection.py` | `SelectionManager` — pure-logic multi-select |
+| `tests/test_selection.py` | 15 tests for selection logic |
+| `tests/test_bulk_capture.py` | 12 tests for filtering, labeling, undo, delete, pagination |
+
+### Test coverage
+
+108 tests total (was 81).
+
+### What's next (v2.1 Phase 2–4)
+
+- In-app training with progress dialog and diagnostics
+- Model browser window (list, metrics, ROC curves, "Use This Model" with persistence)
+- `settings` table in SQLite for persisted preferences

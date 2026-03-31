@@ -35,7 +35,7 @@ def _make_fake_pipeline(
 
     pipeline = FramePipeline.__new__(FramePipeline)
     pipeline.store = store
-    pipeline.hard_frame_dir = hard_dir
+    pipeline.screenshot_dir = hard_dir
     pipeline._temp_dir = tempfile.mkdtemp(prefix="hush_test_")
 
     # Fake classifier
@@ -130,7 +130,7 @@ class TestFrameStorage:
         pipeline.relabel_frame(result, "ad")
         assert result.relabeled is True
         assert result.user_label == "ad"
-        assert result.path.startswith(pipeline.hard_frame_dir)
+        assert result.path.startswith(pipeline.screenshot_dir)
         assert os.path.isfile(result.path)
         assert not os.path.isfile(original_path)
 

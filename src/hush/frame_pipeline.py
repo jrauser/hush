@@ -101,13 +101,13 @@ class FramePipeline:
         self,
         model_path: str,
         store: LabelStore,
-        hard_frame_dir: str = "hard_frames",
+        screenshot_dir: str = "screenshots",
         mute_delay: int = 2,
         unmute_delay: int = 3,
     ):
         self.store = store
-        self.hard_frame_dir = hard_frame_dir
-        os.makedirs(hard_frame_dir, exist_ok=True)
+        self.screenshot_dir = screenshot_dir
+        os.makedirs(screenshot_dir, exist_ok=True)
 
         # Load model
         bundle = load_model(model_path)
@@ -194,7 +194,7 @@ class FramePipeline:
             return
 
         fname = os.path.basename(result.path)
-        dest = os.path.join(self.hard_frame_dir, fname)
+        dest = os.path.join(self.screenshot_dir, fname)
         shutil.move(result.path, dest)
 
         result.path = dest
