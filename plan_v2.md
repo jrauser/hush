@@ -1,6 +1,6 @@
 # Hush v2.0 Plan
 
-**Status:** DRAFT -- iterating with human on requirements before implementation
+**Status:** COMPLETE through v2.0.  Further work superceded by plan_v2.1.md.
 
 ---
 

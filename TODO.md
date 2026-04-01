@@ -1,5 +1,28 @@
 # Hush — TODO
 
+## README: getting started flow
+
+The current README covers running the app but not the new-user journey.
+Add a "Getting Started" section covering the full sequence:
+clone → install → load Chrome extension → capture frames → label → train → monitor.
+
+Also note explicitly that the first training run downloads ~350MB of CLIP model
+weights.
+
+## Setup script
+
+A `setup.sh` that creates the venv, installs deps, and pre-downloads the CLIP
+weights would avoid a surprise 350MB download mid-training.  Single command for
+new users, nothing required after that.
+
+## Starter model
+
+Consider committing a pre-trained `models/starter.joblib` trained on a clean
+dataset (tab-capture only, no full-screen frames).  Lets new users run the
+monitor immediately to see if it works on their stream before committing to the
+labeling effort.  Document clearly that it's tuned to specific content and may
+need retraining.
+
 ## ~~Feature extractor upgrade~~ DONE (2026-03-31)
 
 Try CLIP (ViT-B/32) as a drop-in replacement for ResNet-50 in `build_extractor()`

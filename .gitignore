@@ -9,12 +9,12 @@ __pycache__/
 # User data — not committed
 hush.db
 screenshots/
-hard_frames/
 .claude/
 
 # Generated artifacts
 models/
 roc.png
+hush.command
 
 # macOS
 .DS_Store

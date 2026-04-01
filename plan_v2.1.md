@@ -1,6 +1,6 @@
 # Hush v2.1 Plan
 
-**Status:** IMPLEMENTING — Phases 1–2 complete, Phase 3 next
+**Status:** COMPLETE
 
 ---
 
