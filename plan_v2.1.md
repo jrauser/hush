@@ -232,17 +232,17 @@ Used initially for `active_model_path`. Lightweight key-value store for app pref
 0a. ✓ UI tweak: Replace the single mode toggle button with a button bar where both "Live Monitoring" and "Bulk Capture" are always visible, with the active mode highlighted.
 0b. ✓ UI tweak: In Bulk Capture browse mode, show newest images in the top row (reverse chronological, matching Live mode).
 0c. ✓ Bug fix: Bulk Capture during capture had shifting click targets — full DB re-query on every frame caused all items to shift when a new frame prepended at index 0. Fixed by using a session-local append-only list (`_bulk_capture_items`) during capture, reversed for display (same pattern as live mode's `_history` deque). On stop-capture, the browse grid takes over backed by the full DB. Also added deferred re-render on mode switch for layout timing.
-11. Refactor `train.py` to expose `train_model()` with progress callback.
-12. Training dialog with progress and completion.
-13. Training data mixing warning.
-14. Tests for training pipeline integration.
+11. ✓ Refactor `train.py` to expose `train_model()` with progress callback.
+12. ✓ Training dialog with progress and completion.
+13. ✓ Training data mixing warning.
+14. ✓ Tests for training pipeline integration.
 
-**Phase 4: Model browser**
-15. Add `settings` table to DB, `get_setting()`/`set_setting()` methods.
-16. Build model browser window (list + detail panels).
-17. Embed matplotlib for ROC curves.
-18. "Use This Model" (with persistence) and "Delete Model" actions.
-19. Tests for model browser data loading.
+**Phase 4: Model browser** ✓ DONE
+15. ✓ Add `settings` table to DB, `get_setting()`/`set_setting()` methods.
+16. ✓ Build model browser window (list + detail panels).
+17. ✓ Embed matplotlib for ROC curves.
+18. ✓ "Use This Model" (with persistence) and "Delete Model" actions.
+19. ✓ Tests for model browser data loading.
 
 ---
 

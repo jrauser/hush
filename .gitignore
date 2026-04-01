@@ -10,10 +10,10 @@ __pycache__/
 hush.db
 screenshots/
 hard_frames/
+.claude/
 
 # Generated artifacts
 models/
-feature_cache/
 roc.png
 
 # macOS

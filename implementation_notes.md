@@ -459,8 +459,178 @@ Rather than a separate `BulkThumb` widget, `FrameThumb` handles both modes. For 
 
 108 tests total (was 81).
 
-### What's next (v2.1 Phase 2–4)
+### What's next
 
-- In-app training with progress dialog and diagnostics
-- Model browser window (list, metrics, ROC curves, "Use This Model" with persistence)
-- `settings` table in SQLite for persisted preferences
+- v2.1 Phases 3+4: In-app training, model browser
+
+---
+
+## v2.1 Phase 3: In-app Training (2026-03-31)
+
+### `train_model()` refactor
+
+`train.py`'s `main()` was a monolithic function that parsed CLI args, extracted features, ran CV, saved the model, and printed results to stdout. Refactored into:
+
+- **`train_model()`** — takes explicit parameters (`db_path`, `model_out`, `extractor_name`, `classifier_type`, `n_folds`, `notes`, `on_progress`). Returns a `TrainResult` dataclass with all metrics, paths, and per-fold details. Raises `TrainingError` for insufficient data.
+- **`main()`** — thin CLI wrapper: parses args, calls `train_model()`, prints summary table.
+- **`on_progress(stage, current, total)`** callback fires during `"extracting"` (after each batch) and `"training"` (at the start of each CV fold). The GUI thread bridges this via `QThread` signals.
+
+Replaced `print()`/`tqdm` with `logging` throughout the pipeline. CLI entry point sets up `basicConfig(level=INFO, format='%(message)s')` so the CLI output looks identical to before.
+
+### Binary AUC bug fix
+
+`roc_auc_score` with `multi_class='ovr'` silently fails when exactly 2 classes are present — sklearn detects binary targets and expects a 1D `y_score`, but the code was passing a 2D `prob3[:, active_labels]`. This only manifests when `neither` has zero samples (common in early training). Fixed with an `if len(active_labels) == 2` branch that passes the probability of the higher-indexed class.
+
+### Training dialog (`train_dialog.py`)
+
+Three-phase modal `QDialog`:
+
+1. **Confirmation** — shows label counts per class. If the training set contains multiple sources (e.g. `capture` + `extension`), a warning box appears: "These may look different (e.g. full-screen vs. tab-only). Check that CV metrics are acceptable." Disables the Train button if fewer than 2 classes.
+2. **Progress** — `QProgressBar` + stage label update during extraction and CV. Training runs in a `_TrainWorker(QThread)` off the GUI thread.
+3. **Completion** — shows CV accuracy, F1, AUC with confidence intervals, and model save path. Emits `training_complete(TrainResult)` so the parent auto-loads the new model.
+
+Accessible via **Model > Train Model...** in the menu bar.
+
+### `LabelStore.get_training_summary()`
+
+New method that returns `{label_counts, source_counts, total}` for trainable labels (ad/content/neither). Uses a single `GROUP BY label, source` query. Drives both the confirmation counts and the mixing warning.
+
+### New/changed files
+
+| File | Change |
+|------|--------|
+| `src/hush/train.py` | Refactored: `train_model()`, `TrainResult`, `TrainingError`; binary AUC fix |
+| `src/hush/train_dialog.py` | New: training dialog with progress and mixing warning |
+| `src/hush/label_store.py` | Added `get_training_summary()` |
+| `src/hush/v2app.py` | Added "Train Model..." menu action, `_open_train_dialog()`, `_on_training_complete()` |
+| `tests/test_train.py` | New: 18 tests |
+
+### Test coverage
+
+126 tests total (was 108). New tests cover:
+- Successful training: result type, ROC data saved, metrics ranges, fold results, DB recording, confusion matrix shape
+- Progress callbacks: extraction progress fires with correct totals, training progress fires per fold, no-callback works
+- Error cases: no labeled data, one class, too few for folds, missing image files
+- Feature caching: second run skips extraction (no extraction progress callbacks)
+- `get_training_summary()`: empty DB, single source, mixed sources, ignore-label exclusion
+
+---
+
+## v2.1 Phase 4: Model Browser (2026-03-31)
+
+### Settings table
+
+Added a `settings` key-value table to SQLite (`key TEXT PRIMARY KEY, value TEXT NOT NULL`). Used initially for `active_model_path` — the model selected via the browser persists across app launches. `get_setting(key, default)` / `set_setting(key, value)` use `INSERT OR REPLACE`.
+
+The app startup and mode-switch-to-Live paths now check `get_setting('active_model_path')` before falling back to the CLI `--model` argument.
+
+### Model browser (`model_browser.py`)
+
+`QDialog` with a `QSplitter`: left panel is a `QListWidget` of training runs (from `training_runs` table, newest first); right panel shows details, confusion matrix, and an embedded ROC curve.
+
+**List items** show: filename, date, AUC, sample count, "[file missing]" if the `.joblib` doesn't exist on disk, and a star marker for the active model.
+
+**Detail panel** displays training metadata (date, classifier, extractor, sample counts, notes), CV metrics (accuracy +/- std, F1, AUC +/- std), and confusion matrix as a fixed-width text table.
+
+**ROC curves** use `matplotlib.backends.backend_qtagg.FigureCanvasQTAgg` to embed a matplotlib plot. Computes per-class one-vs-rest ROC curves from the `_roc.npz` file saved alongside each model. Colors match the label color scheme (red=ad, green=content, grey=neither). Handles missing `.npz` files gracefully.
+
+**"Use This Model"** saves the path to `settings.active_model_path`, emits `model_selected(str)` so the app reloads the pipeline, and refreshes the list to show the updated active marker. Disabled when the model file is missing.
+
+**"Delete Model"** requires confirmation (`QMessageBox.question`). Removes the `.joblib` and `_roc.npz` files from disk, deletes the DB record, and clears `active_model_path` if it pointed to the deleted model.
+
+### LabelStore additions
+
+- `get_training_runs()` — returns all training runs as dicts, newest first.
+- `delete_training_run(run_id)` — deletes a training run record by ID.
+
+### New/changed files
+
+| File | Change |
+|------|--------|
+| `src/hush/label_store.py` | Added `settings` table, `get_setting()`, `set_setting()`, `get_training_runs()`, `delete_training_run()` |
+| `src/hush/model_browser.py` | New: model browser window |
+| `src/hush/v2app.py` | Added "Browse Models..." menu action, persisted model selection at startup and mode-switch |
+| `tests/test_model_browser.py` | New: 14 tests |
+
+### Test coverage
+
+142 tests total (was 126). New tests cover:
+- Settings: get/set, default value, overwrite, multiple keys
+- Training runs: empty DB, dict return, newest-first ordering, delete, noop delete, confusion matrix round-trip, duplicate model_path replacement, UNIQUE constraint enforcement
+- Data flow patterns: active model persistence, delete-clears-setting, ROC data reconciliation, missing model file detection
+
+---
+
+## Bug fix: duplicate filename crash in Bulk Capture (2026-03-31)
+
+Rapidly tapping the interval spinner in Bulk Capture triggered instant recaptures. Two frames arriving within the same second produced identical filenames (`YYYYMMDD_HHMMSS_<id>.jpg`), and the `UNIQUE` constraint on `screenshots.filename` crashed the app with `IntegrityError`.
+
+**Root cause:** The `id(frame_data)` suffix was meant to differentiate files but Python reuses object IDs — it provided no real uniqueness. The timestamp had only 1-second resolution.
+
+**Fix:** Replaced the filename scheme with microsecond precision (`YYYYMMDD_HHMMSS_UUUUUU.jpg`) in both `v2app._on_frame_bulk()` and `frame_pipeline.process_frame()`. Also added a `try/except` around `add_screenshot()` in the bulk path — on the off chance a collision still occurs, the duplicate frame is dropped and cleaned up instead of crashing.
+
+---
+
+## Training runs: duplicate model_path cleanup (2026-03-31)
+
+The CLI `train.py` defaulted to `models/classifier.joblib`, so every training run overwrote the same file and inserted a new DB row. Over time this accumulated many stale rows pointing to a file whose contents only matched the most recent run.
+
+**Fixes:**
+1. `record_training_run()` now deletes any existing row with the same `model_path` before inserting. The old record is stale since the file was overwritten.
+2. Added a `UNIQUE INDEX` on `training_runs.model_path`. On first connection to an existing DB, a migration-safe `DELETE` deduplicates old rows (keeping newest by `id`) before creating the index.
+3. Changed the default output path from `models/classifier.joblib` to `models/classifier_YYYYMMDD_HHMMSS.joblib` — both in `train_model()` and the CLI. Each run now produces a unique file.
+4. Model browser filters out runs whose model file no longer exists on disk — they're historical noise, not actionable choices.
+
+---
+
+## v2.1 UI Polish (2026-03-31)
+
+### Settings dialog (`settings_dialog.py`)
+
+Persistent app preferences stored in the `settings` table. Fields: active model, live monitoring interval, bulk capture interval, mute delay, unmute delay, screenshot directory.
+
+Accessed via a **Settings** button in the header bar and via **Cmd+,** (macOS Preferences convention). The `QAction` uses `MenuRole.PreferencesRole` so Qt automatically moves it into the system app menu — no visible menu bar entry needed.
+
+The "Browse..." button next to the active model opens `ModelBrowser` rather than a file picker — consistent UX and shows full diagnostics. Note: `ModelBrowser` persists the selection to the settings table immediately on "Use This Model", before `SettingsDialog` is accepted. If the user cancels the settings dialog afterward, the DB has the new model path but the running pipeline doesn't — it loads on next launch. Acceptable; the pipeline can also be updated live via the Models button.
+
+`_apply_settings()` applies changes to the running app without restart: pushes new interval to the extension, updates `pipeline.fsm.mute_delay` / `unmute_delay` directly, updates the bulk interval spinbox.
+
+Settings are loaded at startup in `_load_persisted_settings()`, called before `_build_ui()` so the spinbox initializes from the saved value.
+
+### Model menu removed; Models and Settings buttons in header
+
+The **Model** menu (Load Model, Train Model, Browse Models) was removed. Its functionality is now in two always-visible header buttons:
+
+- **Models** — opens `ModelBrowser`. Training is also accessible from within the browser via a "Train New Model..." button on the left panel.
+- **Settings** — opens `SettingsDialog`. The "Load Model" action was dropped entirely; model selection goes through the browser.
+
+This avoids a menu bar with only one menu for three items, and keeps the primary actions permanently visible.
+
+### Training dialog: two progress bars
+
+The training dialog previously had a single progress bar that was overwritten when the phase changed from extraction to CV — the user couldn't tell where they were in the overall process.
+
+Now two separate labeled rows are always visible during training: **Feature extraction** and **Cross-validation**. Both appear at once when training starts so the dialog doesn't resize mid-run. The extraction bar fills first; the CV bar starts indeterminate and fills as folds complete.
+
+`train.py` was updated to always emit `on_progress("extracting", 0, N)` before extraction begins, where `N` is the count of images needing processing (0 if all cached). The dialog handles `N=0` by marking the extraction bar full and displaying "pre-cached for all N frames" rather than a moving bar.
+
+### Labeling during active bulk capture (bug fix)
+
+Selecting frames and pressing a label key during active capture appeared to work (selection cleared) but didn't update the thumbnail border color. Two issues:
+
+1. `_relabel_selected_bulk()` only updated `_bulk_all_rows` in-memory — those rows don't exist yet during capture (the session uses `_bulk_capture_items` instead). The DB write succeeded but the in-memory state didn't match.
+2. `FrameThumb` uses `result.user_label if result.relabeled else result.pred_label` for border color. Newly captured frames have `relabeled=False`, so setting `user_label` alone didn't change the displayed color.
+
+Fix: `_relabel_selected_bulk()` now also iterates `_bulk_capture_items` and sets both `user_label` and `relabeled = True` on matched items.
+
+### App-wide font standardization
+
+Set `app.setFont(QFont("Helvetica", 14))` in `main()`. All widgets inherit 14pt unless explicitly overridden. Removed per-widget `setFont(14)` calls throughout. Intentional exceptions: 20pt bold status indicator, 9pt thumbnail caption badge, Menlo 12pt confusion matrix, Menlo 14pt settings model filename path.
+
+### Bulk capture controls bar
+
+The filter combobox and interval spinbox had fixed pixel widths set when the app used a smaller font. At 14pt both controls were vertically clipped. Fixed with `setMinimumHeight(30)` and slightly wider `setFixedWidth` values. Vertical padding on the controls bar bumped from 4px to 6px.
+
+### Grid reflow on window resize
+
+Added `resizeEvent` override: re-renders the bulk browse grid when the window is resized (skipped during active capture to avoid disrupting the stable-grid/placeholder logic).

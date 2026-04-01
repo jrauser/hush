@@ -1,5 +1,26 @@
 # Hush — TODO
 
+## V2.1 Tweaks
+
+* Refresh in bulk capture when resize window
+* Text on buttons in header too small.  Gear icon impossible to distinguish
+* Text in model browser window very small.
+
+
+## Settings UI
+
+* default interval for bulk capture
+* interval for live monitoring
+* hysteresis settings
+* chosen model: show filaname, a button here brings up model browser window
+* location of database??
+
+
+## BUG report - extension gets wedged it left on while app is missing for a long time
+
+Need to characterize the bug with enough detail that it can be fixed.
+
+
 ## Background tab capture for audio-only monitoring
 
 Use case: you're working on something else while a sports stream plays in a background Chrome tab. You can hear the audio — your brain handles "is something exciting happening?" — but you want ads muted automatically.

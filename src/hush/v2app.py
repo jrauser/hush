@@ -33,7 +33,6 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QVBoxLayout,
     QWidget,
-    QFileDialog,
     QComboBox,
     QLineEdit,
     QSpinBox,
@@ -44,6 +43,12 @@ from hush.frame_pipeline import FramePipeline, FrameResult
 from hush.label_store import LabelStore
 from hush.selection import SelectionManager
 from hush.server import HushServer, FrameData
+from hush.model_browser import ModelBrowser
+from hush.settings_dialog import (
+    KEY_ACTIVE_MODEL, KEY_BULK_INTERVAL, KEY_LIVE_INTERVAL,
+    KEY_MUTE_DELAY, KEY_SCREENSHOT_DIR, KEY_UNMUTE_DELAY,
+    SettingsDialog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -327,8 +332,16 @@ class HushApp(QMainWindow):
             on_connection_change=lambda c: self._bridge.connection_changed.emit(c),
         )
 
+        # Override CLI arg defaults with any persisted settings
+        self._load_persisted_settings()
+
         self._build_ui()
-        self._load_model(args.model)
+
+        # Use persisted model selection if available, fall back to CLI arg
+        saved_model = self._store.get_setting(KEY_ACTIVE_MODEL, '')
+        model_path = saved_model if saved_model and os.path.isfile(saved_model) else args.model
+        self._load_model(model_path)
+
         self._server.start()
         self._update_status()
 
@@ -365,13 +378,11 @@ class HushApp(QMainWindow):
         mode_bar_layout.setSpacing(0)
 
         self._live_btn = QPushButton("Live Monitoring")
-        self._live_btn.setFont(QFont("Helvetica", 11))
         self._live_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._live_btn.clicked.connect(self._switch_to_live)
         mode_bar_layout.addWidget(self._live_btn)
 
         self._bulk_btn = QPushButton("Bulk Capture")
-        self._bulk_btn.setFont(QFont("Helvetica", 11))
         self._bulk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._bulk_btn.clicked.connect(self._switch_to_bulk)
         mode_bar_layout.addWidget(self._bulk_btn)
@@ -379,9 +390,36 @@ class HushApp(QMainWindow):
         header_layout.addWidget(mode_bar)
         self._update_mode_buttons()
 
+        # Models button
+        self._models_btn = QPushButton("Models")
+        self._models_btn.setStyleSheet(
+            "QPushButton { background: #2c3e50; color: white; "
+            "border: none; border-radius: 6px; padding: 6px 14px; }"
+            "QPushButton:hover { background: #34495e; }"
+        )
+        self._models_btn.clicked.connect(self._open_model_browser)
+        header_layout.addWidget(self._models_btn)
+
+        # Settings gear button
+        self._settings_btn = QPushButton("Settings")
+        self._settings_btn.setToolTip("Settings")
+        self._settings_btn.setStyleSheet(
+            "QPushButton { background: #2c3e50; color: white; "
+            "border: none; border-radius: 6px; padding: 6px 14px; }"
+            "QPushButton:hover { background: #34495e; }"
+        )
+        self._settings_btn.clicked.connect(self._open_settings)
+        header_layout.addWidget(self._settings_btn)
+
+        # macOS Preferences menu entry (Cmd+,) — Qt auto-moves it to the app menu
+        prefs_action = QAction("Preferences...", self)
+        prefs_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        prefs_action.triggered.connect(self._open_settings)
+        self.menuBar().addMenu("Hush").addAction(prefs_action)
+
         # Pause / Start-Stop button
         self._action_btn = QPushButton("\u23f8  Pause")
-        self._action_btn.setFont(QFont("Helvetica", 12))
+        self._action_btn.setFont(QFont("Helvetica", 14))
         self._action_btn.setStyleSheet(
             "QPushButton { background: #2c3e50; color: white; "
             "border: none; border-radius: 6px; padding: 6px 14px; }"
@@ -396,12 +434,13 @@ class HushApp(QMainWindow):
         self._bulk_controls = QWidget()
         self._bulk_controls.setStyleSheet("background: #d5d8dc;")
         bc_layout = QHBoxLayout(self._bulk_controls)
-        bc_layout.setContentsMargins(12, 4, 12, 4)
+        bc_layout.setContentsMargins(12, 6, 12, 6)
 
         bc_layout.addWidget(QLabel("Filter:"))
         self._filter_combo = QComboBox()
         self._filter_combo.addItems(FILTER_OPTIONS)
-        self._filter_combo.setFixedWidth(100)
+        self._filter_combo.setFixedWidth(130)
+        self._filter_combo.setMinimumHeight(30)
         self._filter_combo.currentTextChanged.connect(self._apply_bulk_filter)
         bc_layout.addWidget(self._filter_combo)
 
@@ -426,9 +465,10 @@ class HushApp(QMainWindow):
         bc_layout.addWidget(QLabel("Interval:"))
         self._interval_spin = QSpinBox()
         self._interval_spin.setRange(1, 60)
-        self._interval_spin.setValue(DEFAULT_BULK_INTERVAL)
+        self._interval_spin.setValue(self.args.bulk_interval)
         self._interval_spin.setSuffix("s")
-        self._interval_spin.setFixedWidth(70)
+        self._interval_spin.setFixedWidth(80)
+        self._interval_spin.setMinimumHeight(30)
         self._interval_spin.valueChanged.connect(self._on_interval_changed)
         bc_layout.addWidget(self._interval_spin)
 
@@ -478,13 +518,6 @@ class HushApp(QMainWindow):
         # Status bar
         self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
-
-        # Menu bar
-        menu = self.menuBar()
-        model_menu = menu.addMenu("Model")
-        load_action = QAction("Load Model...", self)
-        load_action.triggered.connect(self._choose_model)
-        model_menu.addAction(load_action)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self._undo)
@@ -565,6 +598,11 @@ class HushApp(QMainWindow):
         self._sel.select_all(keys)
         self._render_grid()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._mode == MODE_BULK and not self._bulk_capturing:
+            self._render_grid()
+
     # ── Mode switching ────────────────────────────────────────────────────────
 
     def _switch_to_bulk(self):
@@ -610,7 +648,9 @@ class HushApp(QMainWindow):
         if self._pipeline:
             self._pipeline.cleanup()
         self._history.clear()
-        self._load_model(self.args.model)
+        saved_model = self._store.get_setting('active_model_path', '')
+        model_path = saved_model if saved_model and os.path.isfile(saved_model) else self.args.model
+        self._load_model(model_path)
 
         # Tell extension to start monitoring
         if self._server.extension.connected and self._pipeline:
@@ -656,13 +696,62 @@ class HushApp(QMainWindow):
             logger.error("Failed to load model: %s", e)
             self._statusbar.showMessage(f"Model error: {e}")
 
-    def _choose_model(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Model", "models/",
-            "Joblib files (*.joblib);;All files (*)",
-        )
-        if path:
-            self._load_model(path)
+    def _open_model_browser(self):
+        active = self._store.get_setting(KEY_ACTIVE_MODEL, '')
+        browser = ModelBrowser(self.args.db, active_model_path=active, parent=self)
+        browser.model_selected.connect(self._load_model)
+        browser.exec()
+
+    # ── Settings ──────────────────────────────────────────────────────────────
+
+    def _load_persisted_settings(self):
+        """Override CLI arg defaults with any values persisted in the settings table."""
+        get = self._store.get_setting
+        if v := get(KEY_LIVE_INTERVAL, ''):
+            self.args.interval = float(v)
+        if v := get(KEY_BULK_INTERVAL, ''):
+            self.args.bulk_interval = int(v)
+        if v := get(KEY_MUTE_DELAY, ''):
+            self.args.mute_delay = int(v)
+        if v := get(KEY_UNMUTE_DELAY, ''):
+            self.args.unmute_delay = int(v)
+        if v := get(KEY_SCREENSHOT_DIR, ''):
+            self.args.screenshot_dir = v
+
+    def _open_settings(self):
+        current = {
+            KEY_ACTIVE_MODEL:  self._store.get_setting(KEY_ACTIVE_MODEL, ''),
+            KEY_LIVE_INTERVAL: self.args.interval,
+            KEY_BULK_INTERVAL: self.args.bulk_interval,
+            KEY_MUTE_DELAY:    self.args.mute_delay,
+            KEY_UNMUTE_DELAY:  self.args.unmute_delay,
+            KEY_SCREENSHOT_DIR: self.args.screenshot_dir,
+        }
+        dialog = SettingsDialog(self.args.db, current, parent=self)
+        dialog.settings_changed.connect(self._apply_settings)
+        dialog.exec()
+
+    def _apply_settings(self, settings: dict):
+        """Apply a settings dict to running state."""
+        new_model = settings.get(KEY_ACTIVE_MODEL, '')
+        if new_model and new_model != self._store.get_setting(KEY_ACTIVE_MODEL, ''):
+            self._load_model(new_model)
+
+        self.args.interval = float(settings.get(KEY_LIVE_INTERVAL, self.args.interval))
+        if (self._mode == MODE_LIVE and self._pipeline
+                and not self._pipeline.fsm._paused):
+            self._server.set_mode("active", interval_sec=self.args.interval)
+
+        self.args.bulk_interval = int(settings.get(KEY_BULK_INTERVAL, self.args.bulk_interval))
+        self._interval_spin.setValue(self.args.bulk_interval)
+
+        self.args.mute_delay = int(settings.get(KEY_MUTE_DELAY, self.args.mute_delay))
+        self.args.unmute_delay = int(settings.get(KEY_UNMUTE_DELAY, self.args.unmute_delay))
+        if self._pipeline:
+            self._pipeline.fsm.mute_delay = self.args.mute_delay
+            self._pipeline.fsm.unmute_delay = self.args.unmute_delay
+
+        self.args.screenshot_dir = settings.get(KEY_SCREENSHOT_DIR, self.args.screenshot_dir)
 
     # ── Action button (Pause/Resume in Live, Start/Stop in Bulk) ─────────────
 
@@ -756,16 +845,23 @@ class HushApp(QMainWindow):
         if not self._bulk_capturing:
             return
 
-        # Save to screenshots/
+        # Save to screenshots/ with microsecond precision to avoid collisions
+        # from rapid captures (e.g. interval spinner taps).
         from datetime import datetime
-        fname = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{id(frame_data):08x}.jpg"
+        now = datetime.now()
+        fname = now.strftime("%Y%m%d_%H%M%S") + f"_{now.microsecond:06d}.jpg"
         path = os.path.join(self.args.screenshot_dir, fname)
         os.makedirs(self.args.screenshot_dir, exist_ok=True)
         with open(path, "wb") as f:
             f.write(frame_data.image_bytes)
 
-        timestamp = frame_data.timestamp or datetime.now().isoformat()
-        self._store.add_screenshot(path, timestamp, source="extension")
+        timestamp = frame_data.timestamp or now.isoformat()
+        try:
+            self._store.add_screenshot(path, timestamp, source="extension")
+        except Exception:
+            logger.warning("Duplicate frame dropped: %s", fname)
+            os.remove(path)
+            return
         self._bulk_session_count += 1
 
         # Append to session-local list (not a full DB reload) so existing
@@ -1089,7 +1185,6 @@ class HushApp(QMainWindow):
 
         if not items:
             lbl = QLabel("No images to display.")
-            lbl.setFont(QFont("Helvetica", 14))
             lbl.setStyleSheet("color: #7f8c8d;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setParent(self._grid_surface)
@@ -1167,10 +1262,17 @@ class HushApp(QMainWindow):
 
         self._store.set_labels_bulk(filenames, label)
 
-        # Update in-memory rows
+        # Update in-memory rows (browse mode)
         for r in self._bulk_all_rows:
             if r["filename"] in selected:
                 r["label"] = label
+
+        # Update in-memory items (capture mode — _bulk_capture_items is the
+        # source of truth while capturing; _bulk_all_rows isn't populated yet)
+        for item in self._bulk_capture_items:
+            if item.path in selected:
+                item.user_label = label
+                item.relabeled = True  # gates border-color in FrameThumb
 
         self._sel.clear()
         self._apply_bulk_filter()
@@ -1423,6 +1525,11 @@ def main():
         help="Live monitor capture interval in seconds (default: 2)",
     )
     parser.add_argument(
+        "--bulk-interval", type=int, default=DEFAULT_BULK_INTERVAL,
+        dest="bulk_interval",
+        help=f"Bulk capture interval in seconds (default: {DEFAULT_BULK_INTERVAL})",
+    )
+    parser.add_argument(
         "--mute-delay", type=int, default=2, dest="mute_delay",
         help="Consecutive ad frames before muting (default: 2)",
     )
@@ -1447,6 +1554,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Hush")
+    app.setFont(QFont("Helvetica", 14))
 
     # Let Ctrl+C close the app gracefully.
     signal.signal(signal.SIGINT, lambda *_: app.quit())

@@ -45,6 +45,18 @@ class LabelStore:
                     vector         BLOB NOT NULL,
                     PRIMARY KEY (screenshot_id, extractor)
                 );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                -- Clean up duplicate model_path rows (keep newest) before
+                -- adding the unique index.  Runs once; is a no-op thereafter.
+                DELETE FROM training_runs
+                    WHERE id NOT IN (
+                        SELECT MAX(id) FROM training_runs GROUP BY model_path
+                    );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_training_runs_model_path
+                    ON training_runs(model_path);
                 CREATE INDEX IF NOT EXISTS idx_screenshots_label
                     ON screenshots(label);
                 CREATE INDEX IF NOT EXISTS idx_screenshots_source
@@ -140,6 +152,12 @@ class LabelStore:
         # confusion_matrix may be passed as a dict; store as JSON string
         cm_json = json.dumps(confusion_matrix) if not isinstance(confusion_matrix, str) else confusion_matrix
         with self.conn:
+            # If a previous run wrote to the same model_path, the file was
+            # overwritten — the old record is stale.  Remove it first.
+            self.conn.execute(
+                "DELETE FROM training_runs WHERE model_path = ?",
+                (model_path,),
+            )
             self.conn.execute(
                 """
                 INSERT INTO training_runs
@@ -166,6 +184,61 @@ class LabelStore:
                     feature_extractor,
                     notes,
                 ),
+            )
+
+    def get_training_runs(self):
+        """Return all training runs, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM training_runs ORDER BY run_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_training_run(self, run_id):
+        """Delete a training run record by ID."""
+        with self.conn:
+            self.conn.execute("DELETE FROM training_runs WHERE id = ?", (run_id,))
+
+    def get_training_summary(self):
+        """Return label and source counts for trainable labeled data.
+
+        Returns a dict with keys:
+          - label_counts: {label_name: count} for ad/content/neither
+          - source_counts: {source_name: count}
+          - total: total number of trainable frames
+        """
+        rows = self.conn.execute(
+            "SELECT label, source, COUNT(*) as n FROM screenshots "
+            "WHERE label IN ('ad', 'content', 'neither') "
+            "GROUP BY label, source"
+        ).fetchall()
+        label_counts = {}
+        source_counts = {}
+        total = 0
+        for r in rows:
+            label_counts[r['label']] = label_counts.get(r['label'], 0) + r['n']
+            source_counts[r['source']] = source_counts.get(r['source'], 0) + r['n']
+            total += r['n']
+        return {
+            'label_counts': label_counts,
+            'source_counts': source_counts,
+            'total': total,
+        }
+
+    # ── settings ─────────────────────────────────────────────────────────────
+
+    def get_setting(self, key, default=None):
+        """Return the value for *key*, or *default* if not set."""
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return row['value'] if row else default
+
+    def set_setting(self, key, value):
+        """Insert or update a setting."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
             )
 
     # ── feature vectors ──────────────────────────────────────────────────────

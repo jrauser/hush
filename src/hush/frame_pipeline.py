@@ -152,8 +152,9 @@ class FramePipeline:
         if not timestamp:
             timestamp = datetime.now().isoformat()
 
-        # Save to temp file
-        fname = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{id(image_bytes):08x}.jpg"
+        # Save to temp file (microsecond precision avoids collisions)
+        now = datetime.now()
+        fname = now.strftime("%Y%m%d_%H%M%S") + f"_{now.microsecond:06d}.jpg"
         path = os.path.join(self._temp_dir, fname)
         with open(path, "wb") as f:
             f.write(image_bytes)
