@@ -62,11 +62,23 @@ def build_extractor(extractor_name: str, device):
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ])
 
-        def extract(img: Image.Image) -> np.ndarray:
+        def extract_resnet(img: Image.Image) -> np.ndarray:
             t = tf(img.convert("RGB")).unsqueeze(0).to(device)
             with torch.no_grad():
                 return net(t).squeeze(-1).squeeze(-1).cpu().numpy()
-        return extract
+        return extract_resnet
+
+    if extractor_name == "clip":
+        import clip
+
+        model, preprocess = clip.load("ViT-B/32", device=device)
+        model.eval()
+
+        def extract_clip(img: Image.Image) -> np.ndarray:
+            t = preprocess(img.convert("RGB")).unsqueeze(0).to(device)
+            with torch.no_grad():
+                return model.encode_image(t).float().cpu().numpy()
+        return extract_clip
 
     raise ValueError(f"Unknown extractor: {extractor_name!r}")
 
@@ -115,12 +127,13 @@ class FramePipeline:
         self._label_map = bundle["label_map"]
         self._ad_class = self._label_map["ad"]
 
-        # Feature extractor
-        device = (
-            torch.device("mps")
-            if torch.backends.mps.is_available()
-            else torch.device("cpu")
-        )
+        # Feature extractor — prefer MPS (Apple Silicon) → CUDA → CPU
+        if torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
         self._extract = build_extractor(
             bundle.get("extractor", "resnet50"), device
         )

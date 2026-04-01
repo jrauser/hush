@@ -5,6 +5,7 @@ import os
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -16,7 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from hush.label_store import LabelStore
-from hush.train import TrainResult, TrainingError, default_model_path, train_model
+from hush.train import EXTRACTORS, TrainResult, TrainingError, default_model_path, train_model
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,11 @@ class _TrainWorker(QThread):
     finished = pyqtSignal(object)          # TrainResult on success
     failed = pyqtSignal(str)               # error message
 
-    def __init__(self, db_path, model_out=None, notes=None):
+    def __init__(self, db_path, model_out=None, extractor_name='resnet50', notes=None):
         super().__init__()
         self.db_path = db_path
         self.model_out = model_out
+        self.extractor_name = extractor_name
         self.notes = notes
 
     def run(self):
@@ -39,6 +41,7 @@ class _TrainWorker(QThread):
             result = train_model(
                 db_path=self.db_path,
                 model_out=self.model_out,
+                extractor_name=self.extractor_name,
                 notes=self.notes,
                 on_progress=lambda stage, cur, total: self.progress.emit(stage, cur, total),
             )
@@ -97,15 +100,30 @@ class TrainDialog(QDialog):
         self._warning_label.setVisible(False)
         self._layout.addWidget(self._warning_label)
 
-        # Model name row — wrapped so both label and field hide together
-        self._name_widget = QWidget()
-        name_row = QHBoxLayout(self._name_widget)
-        name_row.setContentsMargins(0, 0, 0, 0)
+        # Options row (model name + extractor) — hidden during training
+        self._options_widget = QWidget()
+        options_layout = QVBoxLayout(self._options_widget)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setSpacing(6)
+
+        name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Model name:"))
         self._name_edit = QLineEdit()
         self._name_edit.setPlaceholderText("e.g. classifier_20260331_120000")
         name_row.addWidget(self._name_edit)
-        self._layout.addWidget(self._name_widget)
+        options_layout.addLayout(name_row)
+
+        extractor_row = QHBoxLayout()
+        extractor_row.addWidget(QLabel("Feature extractor:"))
+        self._extractor_combo = QComboBox()
+        for name in EXTRACTORS:
+            self._extractor_combo.addItem(name)
+        self._extractor_combo.setCurrentText("clip")
+        extractor_row.addWidget(self._extractor_combo)
+        extractor_row.addStretch()
+        options_layout.addLayout(extractor_row)
+
+        self._layout.addWidget(self._options_widget)
 
         # ── Extraction progress ──────────────────────────────────────────────
         self._extract_label = QLabel("Feature extraction:")
@@ -185,7 +203,7 @@ class TrainDialog(QDialog):
 
         self._info_label.setText("Training in progress...")
         self._warning_label.setVisible(False)
-        self._name_widget.setVisible(False)
+        self._options_widget.setVisible(False)
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         self._buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(False)
 
@@ -196,7 +214,10 @@ class TrainDialog(QDialog):
         self._cv_bar.setVisible(True)
         self._cv_bar.setMaximum(0)  # indeterminate until CV starts
 
-        self._worker = _TrainWorker(self._db_path, model_out=model_out)
+        extractor_name = self._extractor_combo.currentText()
+        self._worker = _TrainWorker(
+            self._db_path, model_out=model_out, extractor_name=extractor_name
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)

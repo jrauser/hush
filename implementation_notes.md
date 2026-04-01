@@ -634,3 +634,16 @@ The filter combobox and interval spinbox had fixed pixel widths set when the app
 ### Grid reflow on window resize
 
 Added `resizeEvent` override: re-renders the bulk browse grid when the window is resized (skipped during active capture to avoid disrupting the stable-grid/placeholder logic).
+
+### CLIP outperforms ResNet-50 for feature extraction
+
+Tested on 2026-03-31 with the same labeled dataset and GBM classifier:
+
+| Extractor   | CV AUC  |
+|-------------|---------|
+| ResNet-50   | 0.962   |
+| CLIP ViT-B/32 | 0.988 |
+
+CLIP's 2.6-point AUC improvement is substantial. Likely explanation: CLIP was trained on image-text pairs that include broadcast/advertising content, so its feature space already encodes the visual grammar of "advertisement" vs. "live sports" — a stronger prior than ImageNet classification. ResNet-50 features are semantically rich but not specifically aligned to this domain.
+
+CLIP (512-dim) is now the preferred extractor for new model training. ResNet-50 remains available for comparison.

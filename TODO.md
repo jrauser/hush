@@ -1,6 +1,6 @@
 # Hush — TODO
 
-## Feature extractor upgrade
+## ~~Feature extractor upgrade~~ DONE (2026-03-31)
 
 Try CLIP (ViT-B/32) as a drop-in replacement for ResNet-50 in `build_extractor()`
 ([src/hush/frame_pipeline.py](src/hush/frame_pipeline.py)).  CLIP's semantic

@@ -32,6 +32,15 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 # ── feature extractors ────────────────────────────────────────────────────────
 
+def _select_device():
+    """Pick the best available device: MPS → CUDA → CPU."""
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
+
 class _ResNet50Extractor:
     name = 'resnet50'
 
@@ -69,10 +78,47 @@ class _ResNet50Extractor:
         return np.vstack(batches)
 
 
+class _CLIPExtractor:
+    name = 'clip'
+
+    def __init__(self, device):
+        import clip
+        self.model, self.preprocess = clip.load('ViT-B/32', device=device)
+        self.model.eval()
+        self.device = device
+
+    def __call__(self, paths, on_progress=None):
+        """Return np.ndarray of shape [N, 512].
+
+        If *on_progress* is provided it is called after each batch as
+        ``on_progress("extracting", images_done, total_images)``.
+        """
+        batches = []
+        batch_size = 32
+        total = len(paths)
+        done = 0
+        for start in range(0, total, batch_size):
+            imgs = [Image.open(p).convert('RGB') for p in paths[start:start + batch_size]]
+            batch = torch.stack([self.preprocess(im) for im in imgs]).to(self.device)
+            with torch.no_grad():
+                out = self.model.encode_image(batch).float()  # [B, 512]
+            batches.append(out.cpu().numpy())
+            done += len(imgs)
+            if on_progress:
+                on_progress("extracting", done, total)
+        return np.vstack(batches)
+
+
+EXTRACTORS = {
+    'resnet50': _ResNet50Extractor,
+    'clip': _CLIPExtractor,
+}
+
+
 def build_extractor(name, device):
-    if name == 'resnet50':
-        return _ResNet50Extractor(device)
-    raise ValueError(f'Unknown extractor: {name!r}')
+    if name not in EXTRACTORS:
+        raise ValueError(f'Unknown extractor: {name!r}. Choose from: {list(EXTRACTORS)}')
+    return EXTRACTORS[name](device)
 
 
 # ── result dataclass ─────────────────────────────────────────────────────────
@@ -109,7 +155,7 @@ def default_model_path() -> str:
 def train_model(
     db_path: str,
     model_out: str | None = None,
-    extractor_name: str = 'resnet50',
+    extractor_name: str = 'clip',
     classifier_type: str = 'gbm',
     n_folds: int = 5,
     notes: str | None = None,
@@ -125,7 +171,7 @@ def train_model(
         Where to save the model bundle (``.joblib``).  Defaults to a
         timestamped path under ``models/``.
     extractor_name : str
-        Feature extractor name (currently only ``"resnet50"``).
+        Feature extractor name: ``"clip"`` (default) or ``"resnet50"``.
     classifier_type : str
         ``"gbm"`` or ``"rf"``.
     n_folds : int
@@ -184,10 +230,7 @@ def train_model(
     if missing:
         logger.info('Extracting %s features for %d images (%d cached)',
                      extractor_name, len(missing), len(cached))
-        if torch.backends.mps.is_available():
-            device = torch.device('mps')
-        else:
-            device = torch.device('cpu')
+        device = _select_device()
         logger.info('Device: %s', device)
         extractor = build_extractor(extractor_name, device)
         missing_paths = [r['filename'] for r in missing]

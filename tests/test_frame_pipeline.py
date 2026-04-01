@@ -7,13 +7,14 @@ without requiring a real model or GPU.
 import io
 import os
 import tempfile
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
-from hush.frame_pipeline import FramePipeline
+from hush.frame_pipeline import FramePipeline, build_extractor
 from hush.label_store import LabelStore
 
 
@@ -157,3 +158,22 @@ class TestFrameStorage:
         pipeline.relabel_frame(result, "content")
         assert result.user_label == "ad"
         assert result.path == first_path
+
+
+class TestBuildExtractor:
+    def test_unknown_extractor_raises(self):
+        with pytest.raises(ValueError, match="Unknown extractor"):
+            build_extractor("nonexistent", torch.device("cpu"))
+
+    def test_clip_extractor_returns_512_dim(self):
+        """build_extractor('clip') wraps CLIP and returns a [1, 512] vector."""
+        fake_model = MagicMock()
+        fake_model.encode_image.return_value = torch.zeros(1, 512)
+        fake_preprocess = MagicMock(return_value=torch.zeros(3, 224, 224))
+
+        with patch("clip.load", return_value=(fake_model, fake_preprocess)):
+            extractor = build_extractor("clip", torch.device("cpu"))
+
+        img = Image.new("RGB", (100, 75))
+        result = extractor(img)
+        assert result.shape == (1, 512)
