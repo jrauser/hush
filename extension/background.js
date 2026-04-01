@@ -302,6 +302,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ...state });
     return true;
   }
+  if (msg.type === "prepareEnable") {
+    // Tear down any stale offscreen document (e.g. from a previous session
+    // whose service worker was killed by Chrome) so that the tab's capture
+    // slot is free before the popup calls getMediaStreamId().
+    destroyOffscreen().then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (msg.type === "enable") {
     handleEnable(msg).then(() => sendResponse({ ok: true }));
     return true;

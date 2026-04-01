@@ -71,7 +71,16 @@ document.addEventListener("DOMContentLoaded", () => {
       // Disable
       chrome.runtime.sendMessage({ type: "disable" }, refreshState);
     } else {
-      // Enable — get the active tab and obtain a capture stream ID.
+      // Enable — tear down any stale offscreen document first.  If Chrome
+      // killed the service worker while a previous capture was running, the
+      // offscreen document (and its MediaStream) can outlive the SW, leaving
+      // the tab's capture slot occupied.  getMediaStreamId() will fail with
+      // "only one stream per tab" until that slot is freed.
+      await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: "prepareEnable" }, resolve);
+      });
+
+      // Get the active tab and obtain a capture stream ID.
       // getMediaStreamId() must be called here (popup) where the user
       // gesture context from the button click is available.
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
