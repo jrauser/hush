@@ -15,8 +15,7 @@ Automatically mutes audio during ad breaks while streaming sports, then unmutes 
 
 ## Requirements
 
-- macOS on Apple Silicon
-- Python 3.13 via Homebrew: `brew install python@3.13 python-tk@3.13`
+- Python 3.13
 - Google Chrome
 - `uv` for environment management
 
