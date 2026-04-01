@@ -299,6 +299,7 @@ class HushApp(QMainWindow):
 
         # ── Live mode state ──────────────────────────────────────────────
         self._history: deque[FrameResult] = deque(maxlen=args.history_size)
+        self._live_frame_count: int = 0  # never capped; drives placeholder phase
         self._pipeline: Optional[FramePipeline] = None
         self._model_name: str = ""
         self._pending_user_unmuted = False
@@ -640,6 +641,7 @@ class HushApp(QMainWindow):
         self._mode = MODE_LIVE
         self._sel.clear()
         self._prev_n_placeholders = -1
+        self._live_frame_count = len(self._history)  # sync phase with existing history
         self._update_mode_buttons()
         self._bulk_controls.setVisible(False)
         self._update_legend()
@@ -825,10 +827,11 @@ class HushApp(QMainWindow):
             self._pipeline.delete_temp_file(old)
 
         self._history.append(result)
+        self._live_frame_count += 1
 
         logger.info(
             "Frame #%d: pred=%s  P(ad)=%.1f%%  uncertain=%s  fsm_action=%s",
-            len(self._history), result.pred_label, result.prob_ad * 100,
+            self._live_frame_count, result.pred_label, result.prob_ad * 100,
             result.uncertain, result.fsm_action,
         )
 
@@ -1041,12 +1044,11 @@ class HushApp(QMainWindow):
 
         n = len(self._history)
         if n == 0:
-            total_cells = n_cols
-        elif n % n_cols == 0:
-            total_cells = n
+            n_placeholders = n_cols
         else:
-            total_cells = ((n - 1) // n_cols + 1) * n_cols
-        n_placeholders = total_cells - n
+            phase = self._live_frame_count % n_cols
+            n_placeholders = (n_cols - phase) % n_cols
+        total_cells = n + n_placeholders
 
         # Slide-down triggers when the previous render had a completely full
         # top row (0 placeholders) and this render created a new row of them.

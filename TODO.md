@@ -1,19 +1,15 @@
 # Hush — TODO
 
-## V2.1 Tweaks
 
-* Refresh in bulk capture when resize window
-* Text on buttons in header too small.  Gear icon impossible to distinguish
-* Text in model browser window very small.
+## Question
 
+If I train and pick a new model during live capture is it swapped in and used for inference right away or does it require a restart?
 
-## Settings UI
+## BUG report - in live monitor mode right to left grid fill breaks after running for a while.
 
-* default interval for bulk capture
-* interval for live monitoring
-* hysteresis settings
-* chosen model: show filaname, a button here brings up model browser window
-* location of database??
+When you start up the app and start live monitoring, the frames fill in exactly like we want.  newest at the top, placeholders pop in, frames fill right to left and the old rows animate down as the new row pops in. 
+
+But after a while (maybe once we've captured enough frames that we start to purge old ones??  I'm not sure what the trigger is.) the desired behavior breaks.  New frames always appear in the same spot pushing all other frames to the right/down.  This makes selecting difficult as the frames are moving targets.
 
 
 ## BUG report - extension gets wedged it left on while app is missing for a long time
