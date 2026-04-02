@@ -82,7 +82,12 @@ class _CLIPExtractor:
     name = 'clip'
 
     def __init__(self, device):
-        import clip
+        import warnings
+        with warnings.catch_warnings():
+            # openai-clip uses the deprecated pkg_resources API internally;
+            # suppress until upstream fixes it.
+            warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+            import clip
         self.model, self.preprocess = clip.load('ViT-B/32', device=device)
         self.model.eval()
         self.device = device

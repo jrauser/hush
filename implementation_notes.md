@@ -647,3 +647,23 @@ Tested on 2026-03-31 with the same labeled dataset and GBM classifier:
 CLIP's 2.6-point AUC improvement is substantial. Likely explanation: CLIP was trained on image-text pairs that include broadcast/advertising content, so its feature space already encodes the visual grammar of "advertisement" vs. "live sports" — a stronger prior than ImageNet classification. ResNet-50 features are semantically rich but not specifically aligned to this domain.
 
 CLIP (512-dim) is now the preferred extractor for new model training. ResNet-50 remains available for comparison.
+
+### openai-clip pkg_resources deprecation warning
+
+`openai-clip` uses the deprecated `pkg_resources` API for version parsing and emits a `UserWarning` on import. There is no upstream fix. Suppressed with `warnings.filterwarnings` at both `import clip` sites (`train.py` and `frame_pipeline.py`) since the warning is about a third-party internal, not our code.
+
+### No-model empty state
+
+When no model is found at startup (or when the user navigates to Live Monitor with no model loaded), the original code silently dropped frames and showed "LIVE" status — which was misleading. Fixed:
+
+- App now opens into Bulk Capture mode on startup if no model is available, putting the user directly into the right workflow.
+- Live Monitor shows "NO MODEL" (orange) in the status label and replaces the frame grid with a plain-text prompt directing the user to capture, label, and train.
+- Pause button is disabled (greyed out) when no pipeline is loaded.
+
+### Live mode re-labeling a frame twice
+
+The `not result.relabeled` guard in `_relabel_selected_live()` and `_on_zoom_relabel()` prevented correcting a mistake after an initial label had been applied. Removed the guard: for already-relabeled frames (file already in `screenshots/`), re-labeling now calls `store.set_label()` directly and updates `result.user_label` in memory. The DB ends up with the last applied label, which is correct.
+
+### Selection eviction in live monitor
+
+Frames scroll off the live history grid when the deque is full and a new frame arrives. Previously, a selected frame that scrolled off would remain in the `SelectionManager` set — pressing a label key would then silently relabel it even though it was no longer visible. Fixed by calling `sel.deselect(old.path)` at the eviction point before `delete_temp_file`. Added `SelectionManager.deselect(key)` for this purpose.

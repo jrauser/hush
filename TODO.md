@@ -1,5 +1,17 @@
 # Hush — TODO
 
+## BUG report
+
+supposedly FIXED, not tested.
+
+If in live monitoring mode you select a frame and label it, then realize you made a mistake and relabel to a different class, the label on the frame doesn't change.  It is unclear what happens in the database whether the label is the first one or the last one.
+
+## Fish for labelling errors
+
+Score the training data and surface the frames that are the least likely in their class.  There are possible mistakes in labeling.
+
+In bulk capture/label mode, offer two sort orders: chronological and score.
+
 ## README: getting started flow
 
 The current README covers running the app but not the new-user journey.

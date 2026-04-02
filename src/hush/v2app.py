@@ -79,7 +79,8 @@ STATUS_STYLES = {
     "MUTED": ("MUTED", "#e74c3c"),
     "OVERRIDE": ("OVERRIDE", "#e67e22"),
     "PAUSED": ("PAUSED", "#e67e22"),
-    "DISCONNECTED": ("NO EXTENSION", "#95a5a6"),
+    "DISCONNECTED": ("DISCONNECTED", "#95a5a6"),
+    "NO MODEL": ("NO MODEL", "#e67e22"),
     "CAPTURING": ("CAPTURING", "#3498db"),
     "IDLE": ("IDLE", "#95a5a6"),
 }
@@ -342,6 +343,13 @@ class HushApp(QMainWindow):
         saved_model = self._store.get_setting(KEY_ACTIVE_MODEL, '')
         model_path = saved_model if saved_model and os.path.isfile(saved_model) else args.model
         self._load_model(model_path)
+
+        # If no model is available, open into Bulk Capture mode so the user
+        # can start collecting training data immediately.
+        if not self._pipeline:
+            self._mode = MODE_BULK
+            self._update_mode_buttons()
+            self._bulk_controls.setVisible(True)
 
         self._server.start()
         self._update_status()
@@ -824,6 +832,7 @@ class HushApp(QMainWindow):
         # Evict oldest frame if needed
         if len(self._history) == self._history.maxlen:
             old = self._history[0]
+            self._sel.deselect(old.path)
             self._pipeline.delete_temp_file(old)
 
         self._history.append(result)
@@ -1039,6 +1048,28 @@ class HushApp(QMainWindow):
         sideways. A new placeholder row (with slide-down animation) is created
         only when the previous row is completely full.
         """
+        if not self._pipeline:
+            msg = QLabel(
+                "No model loaded.\n\n"
+                "Go to Bulk Capture, capture at least a hundred frames of each "
+                "type, and label them.\n"
+                "Then use Train Model to train a classifier and come back here."
+            )
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            msg.setWordWrap(True)
+            msg.setFont(QFont("Helvetica", 14))
+            msg.setStyleSheet("color: #95a5a6;")
+            msg.setGeometry(
+                GRID_MARGIN, GRID_MARGIN,
+                max(self._scroll_area.viewport().width() - GRID_MARGIN * 2, 300),
+                200,
+            )
+            msg.setParent(self._grid_surface)
+            msg.show()
+            self._grid_children.append(msg)
+            self._grid_surface.setMinimumHeight(GRID_MARGIN * 2 + 200)
+            return
+
         grid_width = max(self._scroll_area.viewport().width(), 600)
         n_cols = max(1, (grid_width - GRID_MARGIN * 2) // CELL_W)
 
@@ -1244,8 +1275,15 @@ class HushApp(QMainWindow):
             return
         selected = set(self._sel.selected)
         for result in self._history:
-            if result.path in selected and not result.relabeled:
+            if result.path not in selected:
+                continue
+            if not result.relabeled:
+                # First label: move from temp dir to screenshots/ and insert DB record.
                 self._pipeline.relabel_frame(result, label)
+            else:
+                # Re-label: file is already in screenshots/, just update DB and state.
+                self._store.set_label(result.path, label)
+                result.user_label = label
         self._sel.clear()
         self._render_grid()
 
@@ -1340,8 +1378,12 @@ class HushApp(QMainWindow):
         item = items[idx]
 
         if self._mode == MODE_LIVE:
-            if self._pipeline and not item.relabeled:
-                self._pipeline.relabel_frame(item, label)
+            if self._pipeline:
+                if not item.relabeled:
+                    self._pipeline.relabel_frame(item, label)
+                else:
+                    self._store.set_label(item.path, label)
+                    item.user_label = label
         else:
             self._store.set_label(item.path, label)
             self._reload_bulk_data()
@@ -1378,13 +1420,15 @@ class HushApp(QMainWindow):
             self._update_status_bulk()
 
     def _update_status_live(self):
-        if not self._server.extension.connected:
+        if not self._pipeline:
+            state_key = "NO MODEL"
+        elif not self._server.extension.connected:
             state_key = "DISCONNECTED"
-        elif self._pipeline and self._pipeline.fsm._paused:
+        elif self._pipeline.fsm._paused:
             state_key = "PAUSED"
-        elif self._pipeline and self._pipeline.fsm.override:
+        elif self._pipeline.fsm.override:
             state_key = "OVERRIDE"
-        elif self._pipeline and self._pipeline.fsm.muted:
+        elif self._pipeline.fsm.muted:
             state_key = "MUTED"
         else:
             state_key = "LIVE"
@@ -1393,8 +1437,16 @@ class HushApp(QMainWindow):
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"color: {color};")
 
-        # Action button
-        if self._pipeline and self._pipeline.fsm._paused:
+        # Action button — disabled when there is no model
+        if not self._pipeline:
+            self._action_btn.setText("\u23f8  Pause")
+            self._action_btn.setEnabled(False)
+            self._action_btn.setStyleSheet(
+                "QPushButton { background: #2c3e50; color: #95a5a6; "
+                "border: none; border-radius: 6px; padding: 6px 14px; }"
+            )
+        elif self._pipeline.fsm._paused:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText("\u25b6  Resume")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #c0392b; color: white; "
@@ -1402,6 +1454,7 @@ class HushApp(QMainWindow):
                 "QPushButton:hover { background: #e74c3c; }"
             )
         else:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText("\u23f8  Pause")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #2c3e50; color: white; "

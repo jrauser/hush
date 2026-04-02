@@ -90,6 +90,31 @@ class TestClear:
         assert sel.selected == {"d.jpg"}
 
 
+class TestDeselect:
+    def test_deselect_removes_key(self):
+        sel = SelectionManager()
+        sel.click(0, KEYS)
+        sel.click(1, KEYS)
+        sel.deselect("a.jpg")
+        assert not sel.is_selected("a.jpg")
+        assert sel.is_selected("b.jpg")
+        assert sel.count() == 1
+
+    def test_deselect_not_selected_is_noop(self):
+        sel = SelectionManager()
+        sel.click(0, KEYS)
+        sel.deselect("c.jpg")  # not selected
+        assert sel.count() == 1
+
+    def test_deselect_evicted_frame_clears_selection(self):
+        """Simulates a live history frame scrolling off — deselect before eviction."""
+        sel = SelectionManager()
+        sel.click(0, KEYS)
+        assert sel.count() == 1
+        sel.deselect("a.jpg")  # frame evicted from history
+        assert sel.count() == 0
+
+
 class TestLastClickedIdx:
     def test_tracks_last_click(self):
         sel = SelectionManager()

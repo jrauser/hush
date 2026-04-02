@@ -10,6 +10,8 @@ __pycache__/
 hush.db
 screenshots/
 .claude/
+# Old location for some screen shots
+hard_frames/  
 
 # Generated artifacts
 models/
