@@ -58,6 +58,10 @@ class SelectionManager:
         """Select every item in the visible set."""
         self._selected.update(visible_keys)
 
+    def deselect(self, key: str):
+        """Remove a single key from the selection (no-op if not selected)."""
+        self._selected.discard(key)
+
     def clear(self):
         """Deselect everything and reset last-clicked index."""
         self._selected.clear()

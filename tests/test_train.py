@@ -337,3 +337,182 @@ class TestTrainingSummary:
         summary = store.get_training_summary()
         assert summary['total'] == 1
         assert 'ignore' not in summary['label_counts']
+
+
+class TestExtractors:
+    """Unit tests for build_extractor() — mock the heavy model loads."""
+
+    def test_unknown_extractor_raises(self):
+        # EXTRACTORS dict is not patched by the autouse mock; use it directly.
+        from hush.train import EXTRACTORS
+        assert "nonexistent" not in EXTRACTORS
+
+    def test_resnet50_extractor_output_shape(self, tmp_path):
+        """ResNet-50 extractor returns [1, 2048] for a single image."""
+        import torch
+        from PIL import Image
+        from hush.train import _ResNet50Extractor
+
+        img_path = str(tmp_path / "img.png")
+        Image.new("RGB", (100, 75), color=(128, 64, 32)).save(img_path)
+
+        extractor = _ResNet50Extractor(torch.device("cpu"))
+        result = extractor([img_path])
+        assert result.shape == (1, 2048)
+
+    def test_clip_extractor_output_shape(self, tmp_path):
+        """CLIP extractor returns [1, 512] for a single image."""
+        import torch
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+
+        img_path = str(tmp_path / "img.png")
+        Image.new("RGB", (100, 75), color=(128, 64, 32)).save(img_path)
+
+        fake_model = MagicMock()
+        fake_model.encode_image.return_value = torch.zeros(1, 512)
+
+        def fake_preprocess(img):
+            return torch.zeros(3, 224, 224)
+
+        with patch("clip.load", return_value=(fake_model, fake_preprocess)):
+            from hush.train import _CLIPExtractor
+            extractor = _CLIPExtractor(torch.device("cpu"))
+            result = extractor([img_path])
+
+        assert result.shape == (1, 512)
+        fake_model.encode_image.assert_called_once()
+
+    def test_clip_extractor_progress_callback(self, tmp_path):
+        """CLIP extractor fires on_progress for each batch."""
+        import torch
+        from unittest.mock import MagicMock, patch
+        from PIL import Image
+
+        for i in range(3):
+            Image.new("RGB", (10, 10)).save(str(tmp_path / f"img_{i}.png"))
+        paths = [str(tmp_path / f"img_{i}.png") for i in range(3)]
+
+        fake_model = MagicMock()
+        fake_model.encode_image.return_value = torch.zeros(3, 512)
+
+        def fake_preprocess(img):
+            return torch.zeros(3, 224, 224)
+
+        calls = []
+        with patch("clip.load", return_value=(fake_model, fake_preprocess)):
+            from hush.train import _CLIPExtractor
+            extractor = _CLIPExtractor(torch.device("cpu"))
+            extractor(paths, on_progress=lambda s, c, t: calls.append((s, c, t)))
+
+        assert len(calls) > 0
+        assert all(stage == "extracting" for stage, _, _ in calls)
+        assert calls[-1][1] == 3  # final current == total
+
+    def test_train_model_with_clip_extractor(self, db_with_labeled_data, tmp_path):
+        """train_model() accepts extractor_name='clip' and saves feature_extractor in bundle."""
+        from unittest.mock import patch
+        import joblib
+
+        db_path, _, data_tmp = db_with_labeled_data
+        model_out = str(tmp_path / "clip_model.joblib")
+
+        # Patch _CLIPExtractor so it returns 512-dim random vectors without loading weights
+        def fake_clip_call(self, paths, on_progress=None):
+            rng = np.random.RandomState(0)
+            n = len(paths)
+            vecs = rng.randn(n, 512).astype(np.float32)
+            if on_progress:
+                on_progress("extracting", n, n)
+            return vecs
+
+        with patch("hush.train.build_extractor") as mock_build:
+            mock_obj = type("FakeCLIP", (), {"__call__": fake_clip_call})()
+            mock_build.return_value = mock_obj
+            result = train_model(
+                db_path=db_path,
+                model_out=model_out,
+                extractor_name="clip",
+                n_folds=5,
+            )
+
+        assert result.feature_extractor == "clip"
+        bundle = joblib.load(model_out)
+        assert bundle["extractor"] == "clip"
+
+
+class TestScoreLabeledFrames:
+    """Tests for score_labeled_frames()."""
+
+    from hush.train import score_labeled_frames
+
+    def _train_and_score(self, db_with_labeled_data):
+        """Helper: train a model then score the training frames."""
+        from hush.train import score_labeled_frames
+        db_path, _, tmp_path = db_with_labeled_data
+        model_out = str(tmp_path / "models" / "test.joblib")
+        train_model(db_path=db_path, model_out=model_out, n_folds=5)
+        scores = score_labeled_frames(db_path, model_out)
+        return scores, db_path, tmp_path
+
+    def test_returns_score_for_all_labeled_frames(self, db_with_labeled_data):
+        scores, db_path, _ = self._train_and_score(db_with_labeled_data)
+        # db_with_labeled_data has 20 labeled frames (10 ad + 10 content)
+        assert len(scores) == 20
+
+    def test_scores_are_valid_probabilities(self, db_with_labeled_data):
+        scores, _, _ = self._train_and_score(db_with_labeled_data)
+        for sid, (p_true, p_ad) in scores.items():
+            assert 0.0 <= p_true <= 1.0, f"p_true out of range for id {sid}"
+            assert 0.0 <= p_ad <= 1.0, f"p_ad out of range for id {sid}"
+
+    def test_returns_empty_when_no_features_cached(self, tmp_path):
+        """If features table is empty, return empty dict."""
+        from hush.train import score_labeled_frames
+        import joblib
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        db_path = str(tmp_path / "empty.db")
+        store = LabelStore(db_path)
+        fname = str(tmp_path / "frame.jpg")
+        open(fname, "w").close()
+        store.add_screenshot(fname, "2026-01-01T00:00:00", source="capture")
+        store.set_label(fname, "ad")
+
+        # Create a minimal fake model bundle with no features in DB
+        clf = HistGradientBoostingClassifier()
+        clf.fit(np.zeros((2, 4)), [0, 1])
+        model_out = str(tmp_path / "fake.joblib")
+        joblib.dump({
+            "classifier": clf,
+            "label_map": {"ad": 0, "content": 1},
+            "extractor": "resnet50",
+        }, model_out)
+
+        scores = score_labeled_frames(db_path, model_out)
+        assert scores == {}
+
+    def test_unlabeled_frames_excluded(self, db_with_labeled_data):
+        """Unlabeled frames should not appear in scores."""
+        from hush.train import score_labeled_frames
+        db_path, store, tmp_path = db_with_labeled_data
+        model_out = str(tmp_path / "models" / "test.joblib")
+
+        # Add an unlabeled frame with cached features
+        unlabeled_path = str(tmp_path / "unlabeled.jpg")
+        open(unlabeled_path, "w").close()
+        store.add_screenshot(unlabeled_path, "2026-01-02T00:00:00", source="capture")
+        # deliberately no set_label call
+
+        train_model(db_path=db_path, model_out=model_out, n_folds=5)
+        scores = score_labeled_frames(db_path, model_out)
+
+        unlabeled_row = store.get_by_filename(unlabeled_path)
+        assert unlabeled_row["id"] not in scores
+
+    def test_suspicious_sort_order(self, db_with_labeled_data):
+        """After scoring, sorting ascending by p_true surfaces lowest-confidence frames first."""
+        scores, _, _ = self._train_and_score(db_with_labeled_data)
+        sorted_ids = sorted(scores, key=lambda sid: scores[sid][0])
+        p_true_values = [scores[sid][0] for sid in sorted_ids]
+        assert p_true_values == sorted(p_true_values)

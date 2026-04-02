@@ -44,6 +44,7 @@ from hush.label_store import LabelStore
 from hush.selection import SelectionManager
 from hush.server import HushServer, FrameData
 from hush.model_browser import ModelBrowser
+from hush.train import score_labeled_frames
 from hush.settings_dialog import (
     KEY_ACTIVE_MODEL, KEY_BULK_INTERVAL, KEY_LIVE_INTERVAL,
     KEY_MUTE_DELAY, KEY_SCREENSHOT_DIR, KEY_UNMUTE_DELAY,
@@ -79,7 +80,8 @@ STATUS_STYLES = {
     "MUTED": ("MUTED", "#e74c3c"),
     "OVERRIDE": ("OVERRIDE", "#e67e22"),
     "PAUSED": ("PAUSED", "#e67e22"),
-    "DISCONNECTED": ("NO EXTENSION", "#95a5a6"),
+    "DISCONNECTED": ("WAITING FOR EXTENSION", "#95a5a6"),
+    "NO MODEL": ("NO MODEL", "#e67e22"),
     "CAPTURING": ("CAPTURING", "#3498db"),
     "IDLE": ("IDLE", "#95a5a6"),
 }
@@ -204,10 +206,18 @@ class PlaceholderThumb(QFrame):
 # ── Zoom window ──────────────────────────────────────────────────────────────
 
 class ZoomWindow(QDialog):
-    """Full-size image viewer with arrow-key navigation and relabeling."""
+    """Full-size image viewer with arrow-key navigation and relabeling.
+
+    Labeling advances to the next frame rather than closing the window, so
+    the user can work through a sequence without re-opening zoom each time.
+    The ``navigated`` signal fires whenever the displayed frame changes so
+    the background grid can track the selection.
+    """
 
     relabeled = pyqtSignal(int, str)    # (index_in_items, label)
     deleted = pyqtSignal(int)           # index_in_items
+    navigated = pyqtSignal(str)         # path of the currently displayed frame
+    undo_requested = pyqtSignal()
 
     def __init__(self, items: list[FrameResult], start_idx: int, parent=None):
         super().__init__(parent)
@@ -255,6 +265,7 @@ class ZoomWindow(QDialog):
         fname = os.path.basename(item.path)
         self._info_label.setText(f"{fname}  [{label}]")
         self.setWindowTitle(f"{fname}  [{label}]")
+        self.navigated.emit(item.path)
 
     def keyPressEvent(self, event):
         key = event.text().lower()
@@ -262,7 +273,13 @@ class ZoomWindow(QDialog):
 
         if key in label_map:
             self.relabeled.emit(self._idx, label_map[key])
-            self.close()
+            self._items.pop(self._idx)
+            if not self._items:
+                self.close()
+            elif self._idx < len(self._items):
+                self._show(self._idx)   # next item slid into this position
+            else:
+                self._show(self._idx - 1)
         elif key == "d":
             self.deleted.emit(self._idx)
             # Advance or close
@@ -278,6 +295,9 @@ class ZoomWindow(QDialog):
             self._show(self._idx + 1)
         elif event.key() == Qt.Key.Key_Escape:
             self.close()
+        elif (event.key() == Qt.Key.Key_Z and
+              event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.undo_requested.emit()
         else:
             super().keyPressEvent(event)
 
@@ -314,6 +334,13 @@ class HushApp(QMainWindow):
         self._bulk_capture_items: list[FrameResult] = []  # session-local list for stable grid
         self._undo_stack: list[tuple[list[str], dict[str, Optional[str]]]] = []
 
+        # ── Score sort state ─────────────────────────────────────────────
+        self._model_path: str = ""
+        # {screenshot_id: (p_true_label, p_ad)} — populated on demand, cleared on model change
+        self._score_cache: dict[int, tuple[float, float]] = {}
+        self._bulk_n_scored: int = 0
+        self._bulk_n_unscored: int = 0
+
         # ── Grid rendering state ─────────────────────────────────────────
         self._grid_children: list[QWidget] = []
         self._animations: list[QPropertyAnimation] = []
@@ -343,6 +370,13 @@ class HushApp(QMainWindow):
         model_path = saved_model if saved_model and os.path.isfile(saved_model) else args.model
         self._load_model(model_path)
 
+        # If no model is available, open into Bulk Capture mode so the user
+        # can start collecting training data immediately.
+        if not self._pipeline:
+            self._mode = MODE_BULK
+            self._update_mode_buttons()
+            self._bulk_controls.setVisible(True)
+
         self._server.start()
         self._update_status()
 
@@ -361,7 +395,7 @@ class HushApp(QMainWindow):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(16, 8, 16, 8)
 
-        self._status_label = QLabel("DISCONNECTED")
+        self._status_label = QLabel("WAITING FOR EXTENSION")
         self._status_label.setFont(QFont("Helvetica", 20, QFont.Weight.Bold))
         self._status_label.setStyleSheet("color: #95a5a6;")
         header_layout.addWidget(self._status_label)
@@ -383,7 +417,7 @@ class HushApp(QMainWindow):
         self._live_btn.clicked.connect(self._switch_to_live)
         mode_bar_layout.addWidget(self._live_btn)
 
-        self._bulk_btn = QPushButton("Bulk Capture")
+        self._bulk_btn = QPushButton("Training Data")
         self._bulk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._bulk_btn.clicked.connect(self._switch_to_bulk)
         mode_bar_layout.addWidget(self._bulk_btn)
@@ -460,6 +494,16 @@ class HushApp(QMainWindow):
         clear_btn.setFixedWidth(28)
         clear_btn.clicked.connect(self._clear_search)
         bc_layout.addWidget(clear_btn)
+
+        bc_layout.addWidget(QLabel("Sort:"))
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItems(["Newest first", "Suspicious first"])
+        self._sort_combo.setFixedWidth(150)
+        self._sort_combo.setMinimumHeight(30)
+        self._sort_combo.setEnabled(False)
+        self._sort_combo.setToolTip("Load a trained model to enable score sort")
+        self._sort_combo.currentTextChanged.connect(self._apply_bulk_filter)
+        bc_layout.addWidget(self._sort_combo)
 
         bc_layout.addStretch()
 
@@ -692,8 +736,14 @@ class HushApp(QMainWindow):
                 unmute_delay=self.args.unmute_delay,
             )
             self._model_name = os.path.basename(model_path)
+            self._model_path = model_path
+            self._score_cache = {}
+            self._sort_combo.setEnabled(True)
+            self._sort_combo.setToolTip("")
             self._statusbar.showMessage(f"Model: {self._model_name}")
             logger.info("Loaded model: %s", model_path)
+            if self._mode == MODE_BULK and not self._bulk_capturing:
+                self._apply_bulk_filter(clear_selection=False)
         except Exception as e:
             logger.error("Failed to load model: %s", e)
             self._statusbar.showMessage(f"Model error: {e}")
@@ -824,6 +874,7 @@ class HushApp(QMainWindow):
         # Evict oldest frame if needed
         if len(self._history) == self._history.maxlen:
             old = self._history[0]
+            self._sel.deselect(old.path)
             self._pipeline.delete_temp_file(old)
 
         self._history.append(result)
@@ -932,7 +983,24 @@ class HushApp(QMainWindow):
         if search:
             rows = [r for r in rows if search in r["filename"]]
 
-        self._bulk_filtered_rows = list(reversed(rows))  # newest first
+        if self._sort_combo.currentText() == "Suspicious first" and self._model_path:
+            if not self._score_cache:
+                try:
+                    self._score_cache = score_labeled_frames(self.args.db, self._model_path)
+                except Exception:
+                    logger.exception("score_labeled_frames failed; falling back to newest-first")
+                    self._score_cache = {}
+            self._bulk_filtered_rows = sorted(
+                rows,
+                key=lambda r: self._score_cache.get(r["id"], (float('inf'), None))[0],
+            )
+            self._bulk_n_scored = sum(1 for r in rows if r["id"] in self._score_cache)
+            self._bulk_n_unscored = len(rows) - self._bulk_n_scored
+        else:
+            self._bulk_filtered_rows = list(reversed(rows))  # newest first
+            self._bulk_n_scored = 0
+            self._bulk_n_unscored = 0
+
         # Clamp page
         max_page = max(0, self._bulk_total_pages() - 1)
         self._bulk_page = min(self._bulk_page, max_page)
@@ -1000,11 +1068,13 @@ class HushApp(QMainWindow):
     def _row_to_result(self, row: dict) -> FrameResult:
         """Convert a DB row to a FrameResult for display in FrameThumb."""
         label = row.get("label")
+        score = self._score_cache.get(row["id"])
+        prob_ad = score[1] if score is not None else None
         return FrameResult(
             path=row["filename"],
             captured_at=row.get("captured_at", ""),
             pred_label=label,
-            prob_ad=None,
+            prob_ad=prob_ad,
             probs=None,
             uncertain=False,
             fsm_action=None,
@@ -1039,6 +1109,28 @@ class HushApp(QMainWindow):
         sideways. A new placeholder row (with slide-down animation) is created
         only when the previous row is completely full.
         """
+        if not self._pipeline:
+            msg = QLabel(
+                "No model loaded.\n\n"
+                "Go to Training Data, capture at least a hundred frames of each "
+                "type, and label them.\n"
+                "Then use Train Model to train a classifier and come back here."
+            )
+            msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            msg.setWordWrap(True)
+            msg.setFont(QFont("Helvetica", 14))
+            msg.setStyleSheet("color: #95a5a6;")
+            msg.setGeometry(
+                GRID_MARGIN, GRID_MARGIN,
+                max(self._scroll_area.viewport().width() - GRID_MARGIN * 2, 300),
+                200,
+            )
+            msg.setParent(self._grid_surface)
+            msg.show()
+            self._grid_children.append(msg)
+            self._grid_surface.setMinimumHeight(GRID_MARGIN * 2 + 200)
+            return
+
         grid_width = max(self._scroll_area.viewport().width(), 600)
         n_cols = max(1, (grid_width - GRID_MARGIN * 2) // CELL_W)
 
@@ -1244,8 +1336,15 @@ class HushApp(QMainWindow):
             return
         selected = set(self._sel.selected)
         for result in self._history:
-            if result.path in selected and not result.relabeled:
+            if result.path not in selected:
+                continue
+            if not result.relabeled:
+                # First label: move from temp dir to screenshots/ and insert DB record.
                 self._pipeline.relabel_frame(result, label)
+            else:
+                # Re-label: file is already in screenshots/, just update DB and state.
+                self._store.set_label(result.path, label)
+                result.user_label = label
         self._sel.clear()
         self._render_grid()
 
@@ -1332,7 +1431,20 @@ class HushApp(QMainWindow):
         zoom.deleted.connect(
             lambda idx: self._on_zoom_delete(items, idx)
         )
+        zoom.navigated.connect(self._on_zoom_navigate)
+        zoom.undo_requested.connect(self._undo)
         zoom.exec()
+
+    def _on_zoom_navigate(self, path: str):
+        """Sync background grid selection to the frame currently shown in zoom."""
+        keys = self._visible_keys()
+        if path in keys:
+            idx = keys.index(path)
+            self._sel.clear()
+            self._sel.click(idx, keys)
+        else:
+            self._sel.clear()
+        self._render_grid()
 
     def _on_zoom_relabel(self, items: list[FrameResult], idx: int, label: str):
         if idx < 0 or idx >= len(items):
@@ -1340,9 +1452,18 @@ class HushApp(QMainWindow):
         item = items[idx]
 
         if self._mode == MODE_LIVE:
-            if self._pipeline and not item.relabeled:
-                self._pipeline.relabel_frame(item, label)
+            if self._pipeline:
+                if not item.relabeled:
+                    self._pipeline.relabel_frame(item, label)
+                else:
+                    self._store.set_label(item.path, label)
+                    item.user_label = label
         else:
+            old_label = next(
+                (r["label"] for r in self._bulk_all_rows if r["filename"] == item.path),
+                None,
+            )
+            self._undo_stack.append(([item.path], {item.path: old_label}))
             self._store.set_label(item.path, label)
             self._reload_bulk_data()
 
@@ -1378,13 +1499,15 @@ class HushApp(QMainWindow):
             self._update_status_bulk()
 
     def _update_status_live(self):
-        if not self._server.extension.connected:
+        if not self._pipeline:
+            state_key = "NO MODEL"
+        elif not self._server.extension.connected:
             state_key = "DISCONNECTED"
-        elif self._pipeline and self._pipeline.fsm._paused:
+        elif self._pipeline.fsm._paused:
             state_key = "PAUSED"
-        elif self._pipeline and self._pipeline.fsm.override:
+        elif self._pipeline.fsm.override:
             state_key = "OVERRIDE"
-        elif self._pipeline and self._pipeline.fsm.muted:
+        elif self._pipeline.fsm.muted:
             state_key = "MUTED"
         else:
             state_key = "LIVE"
@@ -1393,8 +1516,16 @@ class HushApp(QMainWindow):
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"color: {color};")
 
-        # Action button
-        if self._pipeline and self._pipeline.fsm._paused:
+        # Action button — disabled when there is no model
+        if not self._pipeline:
+            self._action_btn.setText("\u23f8  Pause")
+            self._action_btn.setEnabled(False)
+            self._action_btn.setStyleSheet(
+                "QPushButton { background: #2c3e50; color: #95a5a6; "
+                "border: none; border-radius: 6px; padding: 6px 14px; }"
+            )
+        elif self._pipeline.fsm._paused:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText("\u25b6  Resume")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #c0392b; color: white; "
@@ -1402,6 +1533,7 @@ class HushApp(QMainWindow):
                 "QPushButton:hover { background: #e74c3c; }"
             )
         else:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText("\u23f8  Pause")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #2c3e50; color: white; "
@@ -1441,19 +1573,29 @@ class HushApp(QMainWindow):
         self._status_label.setStyleSheet(f"color: {color};")
 
         # Action button
+        connected = self._server.extension.connected
         if self._bulk_capturing:
+            self._action_btn.setEnabled(True)
             self._action_btn.setText("\u25a0  Stop Capture")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #c0392b; color: white; "
                 "border: none; border-radius: 6px; padding: 6px 14px; }"
                 "QPushButton:hover { background: #e74c3c; }"
             )
-        else:
-            self._action_btn.setText("\u25b6  Start Capture")
+        elif connected:
+            self._action_btn.setEnabled(True)
+            self._action_btn.setText("\u25b6  Bulk Capture")
             self._action_btn.setStyleSheet(
                 "QPushButton { background: #27ae60; color: white; "
                 "border: none; border-radius: 6px; padding: 6px 14px; }"
                 "QPushButton:hover { background: #2ecc71; }"
+            )
+        else:
+            self._action_btn.setEnabled(False)
+            self._action_btn.setText("\u25b6  Bulk Capture")
+            self._action_btn.setStyleSheet(
+                "QPushButton { background: #27ae60; color: #a8d5b5; "
+                "border: none; border-radius: 6px; padding: 6px 14px; }"
             )
 
         # Info label — label stats
@@ -1472,10 +1614,19 @@ class HushApp(QMainWindow):
         # Status bar
         conn = "Connected" if self._server.extension.connected else "Disconnected"
         showing = len(self._bulk_filtered_rows)
+        if self._sort_combo.currentText() == "Suspicious first" and self._bulk_n_scored:
+            if self._bulk_n_unscored:
+                score_msg = (f"  \u00b7  Score: {self._bulk_n_scored} scored, "
+                             f"{self._bulk_n_unscored} unscored (retrain to include)")
+            else:
+                score_msg = f"  \u00b7  Score: {self._bulk_n_scored} scored"
+        else:
+            score_msg = ""
         self._statusbar.showMessage(
             f"Extension: {conn}  \u00b7  "
             f"Showing: {showing}/{total}  \u00b7  "
             f"Session: {self._bulk_session_count} captured"
+            f"{score_msg}"
         )
 
         # Page controls

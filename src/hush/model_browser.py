@@ -137,7 +137,8 @@ class ModelBrowser(QDialog):
             auc_val = run['cv_auc_mean']
             n = run['n_ad'] + run['n_not_ad']
 
-            text = f"{name}\n{date}  AUC={auc_val:.3f}  n={n}"
+            extractor = run.get('feature_extractor', 'resnet50')
+            text = f"{name}\n{date}  {extractor}  AUC={auc_val:.3f}  n={n}"
             if run['model_path'] == self._active_model_path:
                 text += "  \u2605 active"
 

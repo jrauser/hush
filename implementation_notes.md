@@ -634,3 +634,64 @@ The filter combobox and interval spinbox had fixed pixel widths set when the app
 ### Grid reflow on window resize
 
 Added `resizeEvent` override: re-renders the bulk browse grid when the window is resized (skipped during active capture to avoid disrupting the stable-grid/placeholder logic).
+
+### CLIP outperforms ResNet-50 for feature extraction
+
+Tested on 2026-03-31 with the same labeled dataset and GBM classifier:
+
+| Extractor   | CV AUC  |
+|-------------|---------|
+| ResNet-50   | 0.962   |
+| CLIP ViT-B/32 | 0.988 |
+
+CLIP's 2.6-point AUC improvement is substantial. Likely explanation: CLIP was trained on image-text pairs that include broadcast/advertising content, so its feature space already encodes the visual grammar of "advertisement" vs. "live sports" — a stronger prior than ImageNet classification. ResNet-50 features are semantically rich but not specifically aligned to this domain.
+
+CLIP (512-dim) is now the preferred extractor for new model training. ResNet-50 remains available for comparison.
+
+### openai-clip pkg_resources deprecation warning
+
+`openai-clip` uses the deprecated `pkg_resources` API for version parsing and emits a `UserWarning` on import. There is no upstream fix. Suppressed with `warnings.filterwarnings` at both `import clip` sites (`train.py` and `frame_pipeline.py`) since the warning is about a third-party internal, not our code.
+
+### No-model empty state
+
+When no model is found at startup (or when the user navigates to Live Monitor with no model loaded), the original code silently dropped frames and showed "LIVE" status — which was misleading. Fixed:
+
+- App now opens into Bulk Capture mode on startup if no model is available, putting the user directly into the right workflow.
+- Live Monitor shows "NO MODEL" (orange) in the status label and replaces the frame grid with a plain-text prompt directing the user to capture, label, and train.
+- Pause button is disabled (greyed out) when no pipeline is loaded.
+
+### Live mode re-labeling a frame twice
+
+The `not result.relabeled` guard in `_relabel_selected_live()` and `_on_zoom_relabel()` prevented correcting a mistake after an initial label had been applied. Removed the guard: for already-relabeled frames (file already in `screenshots/`), re-labeling now calls `store.set_label()` directly and updates `result.user_label` in memory. The DB ends up with the last applied label, which is correct.
+
+---
+
+## v2.2 — Fish for labeling errors (2026-04-02)
+
+### "Training Data" mode rename
+
+"Bulk Capture" mode renamed to "Training Data" throughout the UI and README. The Start Capture button is now labeled "Bulk Capture" and is disabled (dimmed) when the extension is not connected. Internal constant `MODE_BULK` and code comments unchanged.
+
+### Score sort
+
+A "Sort" combo ("Newest first" / "Suspicious first") was added to the Training Data controls bar. Selecting "Suspicious first" scores all labeled frames using the active model and sorts ascending by `P(true_label)` — the frames the model most disagrees with come first. `P(ad)` is shown on each thumbnail caption (same as live mode), so the direction of the disagreement is immediately visible.
+
+Scoring uses **out-of-fold predictions** saved in the model bundle during cross-validation, not `predict_proba` on the full training set. Using `predict_proba` on training data was tried first and produced 100% / 0% for every frame (the classifier perfectly memorizes its training data). OOF predictions are unbiased because each fold's predictions come from a model that never saw those samples during training. The OOF probs are already computed during the CV loop — saving them adds zero extra compute.
+
+The score cache (`_score_cache`) is cleared whenever the active model changes. If the active model changes while the Training Data view is open, the grid refreshes automatically.
+
+Old model bundles (no `oof_probs` key) fall back to `predict_proba` on cached features with a log warning.
+
+### Zoom window improvements
+
+- **Arrow navigation tracks selection**: `ZoomWindow` emits a `navigated(path)` signal on every frame change. `HushApp` uses the path to update the background grid selection, so the blue highlight always matches what's shown in zoom.
+- **Label keys no longer close zoom**: pressing A/C/N/X applies the label, removes the frame from the zoom's local list (consistent with filtering — a relabeled frame disappears from a class-filtered view), and advances to the next frame. At the last frame it stays put. Escape still closes.
+- **Undo works in zoom**: Ctrl+Z / Cmd+Z in the zoom window emits `undo_requested` back to the main window. Zoom relabels now push to `_undo_stack` (they previously did not, so undo was silently a no-op).
+
+### "WAITING FOR EXTENSION" status
+
+The "DISCONNECTED" status display text was changed to "WAITING FOR EXTENSION" in both Live and Training Data modes. More actionable than "DISCONNECTED".
+
+### Selection eviction in live monitor
+
+Frames scroll off the live history grid when the deque is full and a new frame arrives. Previously, a selected frame that scrolled off would remain in the `SelectionManager` set — pressing a label key would then silently relabel it even though it was no longer visible. Fixed by calling `sel.deselect(old.path)` at the eviction point before `delete_temp_file`. Added `SelectionManager.deselect(key)` for this purpose.
