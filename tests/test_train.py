@@ -439,3 +439,80 @@ class TestExtractors:
         assert result.feature_extractor == "clip"
         bundle = joblib.load(model_out)
         assert bundle["extractor"] == "clip"
+
+
+class TestScoreLabeledFrames:
+    """Tests for score_labeled_frames()."""
+
+    from hush.train import score_labeled_frames
+
+    def _train_and_score(self, db_with_labeled_data):
+        """Helper: train a model then score the training frames."""
+        from hush.train import score_labeled_frames
+        db_path, _, tmp_path = db_with_labeled_data
+        model_out = str(tmp_path / "models" / "test.joblib")
+        train_model(db_path=db_path, model_out=model_out, n_folds=5)
+        scores = score_labeled_frames(db_path, model_out)
+        return scores, db_path, tmp_path
+
+    def test_returns_score_for_all_labeled_frames(self, db_with_labeled_data):
+        scores, db_path, _ = self._train_and_score(db_with_labeled_data)
+        # db_with_labeled_data has 20 labeled frames (10 ad + 10 content)
+        assert len(scores) == 20
+
+    def test_scores_are_valid_probabilities(self, db_with_labeled_data):
+        scores, _, _ = self._train_and_score(db_with_labeled_data)
+        for sid, (p_true, p_ad) in scores.items():
+            assert 0.0 <= p_true <= 1.0, f"p_true out of range for id {sid}"
+            assert 0.0 <= p_ad <= 1.0, f"p_ad out of range for id {sid}"
+
+    def test_returns_empty_when_no_features_cached(self, tmp_path):
+        """If features table is empty, return empty dict."""
+        from hush.train import score_labeled_frames
+        import joblib
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        db_path = str(tmp_path / "empty.db")
+        store = LabelStore(db_path)
+        fname = str(tmp_path / "frame.jpg")
+        open(fname, "w").close()
+        store.add_screenshot(fname, "2026-01-01T00:00:00", source="capture")
+        store.set_label(fname, "ad")
+
+        # Create a minimal fake model bundle with no features in DB
+        clf = HistGradientBoostingClassifier()
+        clf.fit(np.zeros((2, 4)), [0, 1])
+        model_out = str(tmp_path / "fake.joblib")
+        joblib.dump({
+            "classifier": clf,
+            "label_map": {"ad": 0, "content": 1},
+            "extractor": "resnet50",
+        }, model_out)
+
+        scores = score_labeled_frames(db_path, model_out)
+        assert scores == {}
+
+    def test_unlabeled_frames_excluded(self, db_with_labeled_data):
+        """Unlabeled frames should not appear in scores."""
+        from hush.train import score_labeled_frames
+        db_path, store, tmp_path = db_with_labeled_data
+        model_out = str(tmp_path / "models" / "test.joblib")
+
+        # Add an unlabeled frame with cached features
+        unlabeled_path = str(tmp_path / "unlabeled.jpg")
+        open(unlabeled_path, "w").close()
+        store.add_screenshot(unlabeled_path, "2026-01-02T00:00:00", source="capture")
+        # deliberately no set_label call
+
+        train_model(db_path=db_path, model_out=model_out, n_folds=5)
+        scores = score_labeled_frames(db_path, model_out)
+
+        unlabeled_row = store.get_by_filename(unlabeled_path)
+        assert unlabeled_row["id"] not in scores
+
+    def test_suspicious_sort_order(self, db_with_labeled_data):
+        """After scoring, sorting ascending by p_true surfaces lowest-confidence frames first."""
+        scores, _, _ = self._train_and_score(db_with_labeled_data)
+        sorted_ids = sorted(scores, key=lambda sid: scores[sid][0])
+        p_true_values = [scores[sid][0] for sid in sorted_ids]
+        assert p_true_values == sorted(p_true_values)

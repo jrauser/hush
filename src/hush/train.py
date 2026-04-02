@@ -272,6 +272,7 @@ def train_model(
     cm_total     = np.zeros((3, 3), dtype=int)
     all_y_true   = []
     all_y_prob   = []
+    oof_probs: dict[int, np.ndarray] = {}  # screenshot_id -> 3-class prob vector
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
         if on_progress:
@@ -284,6 +285,9 @@ def train_model(
         prob3 = np.zeros((len(val_idx), 3))
         for col, cls in enumerate(clf.classes_):
             prob3[:, cls] = y_prob[:, col]
+
+        for i, global_idx in enumerate(val_idx):
+            oof_probs[rows[global_idx]['id']] = prob3[i]
 
         cm = confusion_matrix(y[val_idx], y_pred, labels=[0, 1, 2])
         cm_total += cm
@@ -319,6 +323,7 @@ def train_model(
         'label_names':         LABEL_NAMES,
         'trained_at':          datetime.now().isoformat(),
         'n_training_samples':  len(y),
+        'oof_probs':           oof_probs,
     }
     joblib.dump(bundle, model_out)
     logger.info('Model saved → %s', model_out)
@@ -362,6 +367,65 @@ def train_model(
         classifier_type=clf_name,
         feature_extractor=extractor_name,
     )
+
+
+# ── Scoring ──────────────────────────────────────────────────────────────────
+
+def score_labeled_frames(
+    db_path: str,
+    model_path: str,
+) -> dict[int, tuple[float, float]]:
+    """Score all labeled frames using a trained model bundle.
+
+    Uses out-of-fold predictions from cross-validation (stored in the bundle)
+    so scores are unbiased — the model never saw these samples during the fold
+    that produced their predictions.
+
+    For models trained before OOF probs were stored (no ``oof_probs`` key),
+    falls back to ``predict_proba`` on cached features, which is biased toward
+    overconfidence on the training set.
+
+    Returns
+    -------
+    dict mapping screenshot_id -> (p_true_label, p_ad).
+    Frames not covered by OOF probs (labeled after training) are omitted.
+    """
+    bundle = joblib.load(model_path)
+    label_map = bundle['label_map']
+    ad_col = label_map.get('ad', 0)
+
+    store = LabelStore(db_path)
+    rows = store.get_labeled()
+    rows = [r for r in rows if r['label'] in label_map]
+    if not rows:
+        return {}
+
+    oof_probs = bundle.get('oof_probs', {})
+
+    if oof_probs:
+        result = {}
+        for r in rows:
+            probs = oof_probs.get(r['id'])
+            if probs is not None:
+                true_col = label_map[r['label']]
+                result[r['id']] = (float(probs[true_col]), float(probs[ad_col]))
+        return result
+
+    # Fallback for old model bundles without OOF probs
+    logger.warning("Model has no OOF probs; falling back to predict_proba (scores will be overconfident)")
+    clf = bundle['classifier']
+    extractor_name = bundle.get('extractor', 'resnet50')
+    cached = store.get_features(extractor_name, [r['id'] for r in rows])
+    scored_rows = [r for r in rows if r['id'] in cached]
+    if not scored_rows:
+        return {}
+    X = np.vstack([cached[r['id']] for r in scored_rows])
+    probs = clf.predict_proba(X)
+    result = {}
+    for i, r in enumerate(scored_rows):
+        true_col = label_map[r['label']]
+        result[r['id']] = (float(probs[i, true_col]), float(probs[i, ad_col]))
+    return result
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────────

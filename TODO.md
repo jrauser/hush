@@ -8,9 +8,9 @@ If in live monitoring mode you select a frame and label it, then realize you mad
 
 ## Fish for labelling errors
 
-Score the training data and surface the frames that are the least likely in their class.  There are possible mistakes in labeling.
+Score the training data and surface the frames that are the least likely in their class.  These are possible mistakes in labeling.
 
-In bulk capture/label mode, offer two sort orders: chronological and score.
+In bulk capture/label mode, offer two sort orders: chronological and score.  Sorting by score surfaces possible labeling errors.
 
 ## README: getting started flow
 

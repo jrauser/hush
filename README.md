@@ -12,7 +12,7 @@ Hush has two components that talk to each other over a local WebSocket:
 
 - **Chrome extension** — Captures periodic still frames from a browser tab and sends them to the desktop app. Also receives mute/unmute commands and applies them to the tab's audio.
 - **Desktop app** — Receives frames, stores them, and runs the classifier. Has three modes:
-  - **Bulk Capture / Label** — Captures a large number of training examples. Watch a stream for an hour or two, then page through the captured frames and label them by hand.
+  - **Training Data** — Captures a large number of training examples. Watch a stream for an hour or two, then page through the captured frames and label them by hand.
   - **Train** — Extracts CLIP features from labeled frames and trains a Gradient Boosting classifier with cross-validation.
   - **Monitor** — Runs the trained classifier on incoming frames in real time and sends mute/unmute commands back to the extension. Frames are not stored unless you correct the classifier. After making corrections, retrain to improve accuracy.
 
@@ -49,21 +49,21 @@ double-click in Finder to launch the app.
 
 ### 3. Collect training data
 
-Launch the app and navigate to the **Bulk Capture** tab:
+Launch the app and navigate to the **Training Data** tab:
 
 ```bash
 .venv/bin/python -m hush.v2app
 ```
 
-- Click **Enable on this tab** in the Hush extension popup to start capturing
-  frames from whatever tab you want to monitor.
+- Click **Enable on this tab** in the Hush extension popup to connect the
+  extension, then click **Bulk Capture** in the app to start capturing frames.
 - Let it run through a representative stretch of content — including both the
   material you want muted and the material you want unmuted. A few hundred
   frames of each is enough to start.
 
 ### 4. Label your frames
 
-In the Bulk Capture tab, set the filter dropdown to **Unlabeled** and page through the captured frames, pressing:
+In the Training Data tab, set the filter dropdown to **Unlabeled** and page through the captured frames, pressing:
 
 | Key | Label |
 |-----|-------|
