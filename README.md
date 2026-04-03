@@ -2,7 +2,7 @@
 
 A trainable, automatic mute controller for streaming video. Hush watches a browser tab, classifies what's on screen, and mutes or unmutes the tab accordingly — no cloud, no subscriptions, no fixed rule set.
 
-You train it on your own content by labeling a few hundred frames. It learns whatever visual distinction matters to you: ad breaks vs. live sports, talk segments vs. gameplay, commercials vs. a movie. The motivating use case is muting ad breaks during live sports streams, but the system is general.
+You train it on your own content by labeling a few hundred frames. It learns whatever visual distinction matters to you: ad breaks vs. live sports, talk segments vs. gameplay, commercials vs. a movie. The motivating use case is muting ad breaks during live sports streams, but the system is general.  Built and tested on macOS, but it should also work on Windows and Linux.
 
 ---
 
@@ -22,7 +22,7 @@ Hush has two components that talk to each other over a local WebSocket:
 
 ### Prerequisites
 
-- Python 3.13 — on macOS: `brew install python@3.13`
+- Python 3.13 - On macOS: `brew install python@3.13`
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for environment management
 - Google Chrome
 
