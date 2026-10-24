@@ -695,3 +695,24 @@ The "DISCONNECTED" status display text was changed to "WAITING FOR EXTENSION" in
 ### Selection eviction in live monitor
 
 Frames scroll off the live history grid when the deque is full and a new frame arrives. Previously, a selected frame that scrolled off would remain in the `SelectionManager` set — pressing a label key would then silently relabel it even though it was no longer visible. Fixed by calling `sel.deselect(old.path)` at the eviction point before `delete_temp_file`. Added `SelectionManager.deselect(key)` for this purpose.
+
+## Hush.app — double-clickable macOS launcher (2026-10-24)
+
+`macos/build_app.sh` (run by `setup.sh` on macOS) builds `Hush.app` in the repo root. It replaces the old generated `hush.command`, which opened a Terminal window.
+
+### Why a compiled launcher instead of a shell script
+
+The obvious bundle (a `Contents/MacOS/Hush` shell script that `exec`s `.venv/bin/python -m hush.v2app`) works, but the Dock and menu bar show **"Python"** with Python's icon. Homebrew's Python is a framework build: `bin/python3.13` is a stub that re-execs `Python.app/Contents/MacOS/Python`, so the process belongs to Python.app. Copying or symlinking the real interpreter into our bundle didn't help either. macOS only treats the process as Hush.app when the running binary is the bundle's `CFBundleExecutable`. The Dock then showed the copied binary's file name ("python").
+
+So `macos/launcher.c` embeds Python with `Py_BytesMain(["-m", "hush.v2app"])`. Before that it:
+- `chdir`s to the repo, because hush resolves `hush.db`, `models/` and `screenshots/` relative to the working directory. The repo path is baked in at compile time with `-DHUSH_REPO_DIR`.
+- sets `__PYVENV_LAUNCHER__` to `.venv/bin/python`. This is the same mechanism the framework stub uses. It makes the embedded interpreter pick up the venv's `pyvenv.cfg`, so site-packages and the editable install work. It only works with framework builds, and the build script checks for one.
+- sends stdout/stderr to `~/Library/Logs/Hush.log`, overwritten on each launch.
+
+Compiler flags come from the venv's `sysconfig` (`INCLUDEPY`, `LIBPL`, `LDVERSION`). Homebrew's framework dylib id is already the stable `/opt/homebrew/opt/...` path, so patch upgrades of Python don't break the binary. A minor-version upgrade breaks it, just as it breaks the venv. The bundle is ad-hoc codesigned.
+
+### Icon
+
+The icon is the 🤫 shushing face emoji. `macos/make_icon.py` renders it from the system Apple Color Emoji font with QPainter at every `.iconset` size, and `iconutil` turns the set into an `.icns`. Rendering at build time keeps Apple's emoji artwork out of the repo.
+
+macOS 26 puts the bundle's `.icns` on a grey squircle tile, because the launcher is linked against the macOS 26 SDK and the icon isn't in the new squircle format. (A shell-script bundle executable has no SDK version and escapes the tile in Finder too, but it shows as "Python" in the Dock; see above.) To get a full-size, untiled emoji in the Dock while Hush is running, `v2app.main()` also calls `app.setWindowIcon(app_icon())`. That sets the runtime application icon, which macOS draws as-is. `src/hush/app_icon.py` has the shared rendering code for both uses. The tiled version still shows in Finder and in the Dock while Hush isn't running.

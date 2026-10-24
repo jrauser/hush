@@ -16,7 +16,7 @@ hard_frames/
 # Generated artifacts
 models/
 roc.png
-hush.command
+Hush.app/
 
 # macOS
 .DS_Store

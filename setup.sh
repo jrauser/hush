@@ -56,16 +56,11 @@ clip.load("ViT-B/32", device="cpu")
 print("  Done.")
 EOF
 
-# ── Create launch script ──────────────────────────────────────────────────────
+# ── Build Hush.app (macOS) ────────────────────────────────────────────────────
 
-LAUNCHER="hush.command"
-cat > "$LAUNCHER" <<'LAUNCHER'
-#!/usr/bin/env bash
-cd "$(dirname "$0")"
-.venv/bin/python -m hush.v2app "$@"
-LAUNCHER
-chmod +x "$LAUNCHER"
-echo "Created $LAUNCHER — double-click it in Finder to launch the app."
+if [ "$(uname)" = "Darwin" ]; then
+  macos/build_app.sh
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
@@ -74,6 +69,6 @@ echo "Setup complete. Next steps:"
 echo "  1. Load the Chrome extension: open chrome://extensions, enable"
 echo "     Developer mode, click 'Load unpacked', select the extension/ folder."
 echo "  2. Launch the app: ./.venv/bin/python -m hush.v2app"
-echo "     (or double-click hush.command in Finder)"
+echo "     (or on macOS, double-click Hush.app in Finder)"
 echo ""
 echo "See README.md for the full getting started guide."

@@ -37,8 +37,8 @@ cd hush
 `setup.sh` creates the virtual environment, installs all dependencies, and
 pre-downloads the CLIP model weights. Fair warning: the initial install is large
 — PyTorch is ~2GB and the CLIP weights are ~350MB (~2.4GB total). Both are
-cached after the first install. It also creates a `hush.command` file you can
-double-click in Finder to launch the app.
+cached after the first install. On macOS it also builds `Hush.app` (see
+[Launching from Finder](#launching-from-finder-macos)).
 
 ### 2. Load the Chrome extension
 
@@ -119,6 +119,23 @@ correction usually gets the model to the point where it rarely makes mistakes.
   --history-size N     Frames in live monitor rolling display (default: 40)
 ```
 
+### Launching from Finder (macOS)
+
+`setup.sh` builds `Hush.app` in the repo directory. Double-click it, or drag
+it to `/Applications` or the Dock. It is a small native launcher (with a 🤫
+icon) that runs this repo's code using this repo's `.venv`. It is not a
+standalone app, so the repo must stay where it is. Rebuild it after moving the
+repo or upgrading Python:
+
+```bash
+macos/build_app.sh
+```
+
+It needs the Xcode command line tools (`xcode-select --install`). The app
+always uses the default CLI options. Its output goes to
+`~/Library/Logs/Hush.log`, which is overwritten on each launch. Look there if
+the app quits right after you open it.
+
 ### Extension popup
 
 Click the Hush icon to see: connection status, current mode, capture interval,
@@ -141,6 +158,7 @@ letting you override it.
 ```
 hush/
 ├── setup.sh                  One-time setup script
+├── macos/                    Hush.app build: launcher.c, Info.plist, icon, build_app.sh
 ├── pyproject.toml
 ├── extension/                Chrome extension
 │   ├── manifest.json
@@ -150,6 +168,7 @@ hush/
 │   └── icons/                State-colored icons
 ├── src/hush/
 │   ├── v2app.py              Desktop app (PyQt6)
+│   ├── app_icon.py           🤫 app icon rendering
 │   ├── server.py             FastAPI server (HTTP + WebSocket)
 │   ├── frame_pipeline.py     Frame classification pipeline
 │   ├── train.py              Feature extraction + classifier training
@@ -173,6 +192,6 @@ hush/
 .venv/bin/python -m pytest tests/ -v
 ```
 
-149 tests covering: server endpoints, WebSocket protocol, resilience/backoff,
+161 tests covering: server endpoints, WebSocket protocol, resilience/backoff,
 frame pipeline, model loading, training, bulk capture, model browser, mute FSM,
 selection, and database operations.

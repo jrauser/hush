@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QDialog,
 )
 
+from hush.app_icon import app_icon
 from hush.frame_pipeline import FramePipeline, FrameResult
 from hush.label_store import LabelStore
 from hush.selection import SelectionManager
@@ -1707,6 +1708,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Hush")
+    app.setWindowIcon(app_icon())
     app.setFont(QFont("Helvetica", 14))
 
     # Let Ctrl+C close the app gracefully.
